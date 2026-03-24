@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+~$*.docx
+
+# Generated data and local outputs stay inside the repo folder but are not versioned.
+/data/alphafold_demo/
+/data/kaggle_cafa5/cafa5_competition_data.zip
+/data/kaggle_cafa5/extracted/
+/outputs/
