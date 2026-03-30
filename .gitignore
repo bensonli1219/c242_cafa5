@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+.venv311/
 ~$*.docx
 
 # Generated data and local outputs stay inside the repo folder but are not versioned.

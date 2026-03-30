@@ -1,0 +1,6 @@
+pyarrow
+torch
+torch_geometric
+dgl<2
+packaging
+psutil
