@@ -930,6 +930,20 @@ def create_progress_bar(total: int):
     )
 
 
+def _flush_manifests(results: list[Any], manifests_dir: Path) -> None:
+    """Write current accumulated results to parquet/csv (overwrites previous checkpoint)."""
+    fragment_rows = [
+        fragment_row
+        for result in results
+        for fragment_row in sorted(result.fragment_rows, key=lambda row: row["model_entity_id"] or "")
+    ]
+    training_rows = [result.training_row for result in results]
+    failure_rows = [failure for result in results for failure in result.failures]
+    write_parquet(manifests_dir / "alphafold_fragments.parquet", fragment_rows, fragment_schema())
+    write_parquet(manifests_dir / "training_index.parquet", training_rows, training_schema())
+    write_failures_csv(manifests_dir / "download_failures.csv", failure_rows)
+
+
 def run_pipeline(
     args: argparse.Namespace,
     client: AlphaFoldClientProtocol | None = None,
@@ -1000,6 +1014,10 @@ def run_pipeline(
                         status_counts["not_found"],
                         status_counts["other"],
                     )
+
+                if completed % 1000 == 0:
+                    _flush_manifests(results, output_dir / "manifests")
+                    LOG.info("Checkpoint written at %d entries.", completed)
         finally:
             if progress is not None:
                 progress.close()
