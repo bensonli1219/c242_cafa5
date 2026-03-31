@@ -16,7 +16,10 @@ Biopython, or DSSP so they can run in the existing project environment.
 from __future__ import annotations
 
 import argparse
+import csv
+import logging
 import math
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -24,8 +27,15 @@ from typing import Any, Iterable
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+try:
+    from tqdm import tqdm
+    HAVE_TQDM = True
+except ImportError:
+    HAVE_TQDM = False
+
 import cafa5_alphafold_pipeline as pipeline
 
+LOG = logging.getLogger(__name__)
 
 AA3_TO_AA1 = {
     "ALA": "A",
@@ -134,6 +144,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--contact-threshold", type=positive_float, default=10.0)
     parser.add_argument("--strict-contact-threshold", type=positive_float, default=8.0)
     parser.add_argument("--batch-size", type=positive_int, default=5000)
+    parser.add_argument(
+        "--workers",
+        type=positive_int,
+        default=1,
+        help="Number of parallel worker processes (default: 1 = serial).",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip already-completed fragments based on checkpoint file in output-dir.",
+    )
     return parser.parse_args(argv)
 
 
@@ -462,6 +483,51 @@ def extract_fragment_features(
     return residue_rows, edge_rows, fragment_features
 
 
+# ---------------------------------------------------------------------------
+# Top-level worker function (must be module-level for ProcessPoolExecutor)
+# ---------------------------------------------------------------------------
+
+def _extract_task(
+    entry_id: str,
+    model_entity_id: str,
+    training_row: dict[str, Any],
+    fragment_row: dict[str, Any],
+    contact_threshold: float,
+    strict_contact_threshold: float,
+) -> tuple[str, str, list[dict[str, Any]] | None, list[dict[str, Any]] | None, dict[str, Any] | None, str | None]:
+    """Thin wrapper around extract_fragment_features that catches all exceptions."""
+    try:
+        residue_rows, edge_rows, frag_feat = extract_fragment_features(
+            training_row=training_row,
+            fragment_row=fragment_row,
+            contact_threshold=contact_threshold,
+            strict_contact_threshold=strict_contact_threshold,
+        )
+        return entry_id, model_entity_id, residue_rows, edge_rows, frag_feat, None
+    except Exception as exc:  # noqa: BLE001
+        return entry_id, model_entity_id, None, None, None, f"{type(exc).__name__}: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint helpers
+# ---------------------------------------------------------------------------
+
+def _load_checkpoint(path: Path) -> set[str]:
+    """Return set of 'entry_id\\tmodel_entity_id' strings that are already done."""
+    if not path.exists():
+        return set()
+    return set(path.read_text(encoding="utf-8").splitlines())
+
+
+def _append_checkpoint(path: Path, entry_id: str, model_entity_id: str) -> None:
+    with path.open("a", encoding="utf-8") as f:
+        f.write(f"{entry_id}\t{model_entity_id}\n")
+
+
+# ---------------------------------------------------------------------------
+# Main extraction logic
+# ---------------------------------------------------------------------------
+
 def run_extraction(args: argparse.Namespace) -> dict[str, Any]:
     training_rows = load_rows(args.training_index)
     fragment_rows = load_rows(args.fragment_manifest)
@@ -469,19 +535,44 @@ def run_extraction(args: argparse.Namespace) -> dict[str, Any]:
 
     training_by_entry = {str(row["entry_id"]): row for row in training_rows}
     fragment_index = build_fragment_index(fragment_rows)
-    selected_entry_ids: list[str] = []
 
-    for entry_id, row in training_by_entry.items():
+    # Build full task list (respects --limit on entries and --entry-ids filter)
+    tasks: list[tuple[str, str, dict[str, Any], dict[str, Any]]] = []
+    seen_entries: set[str] = set()
+    for entry_id, training_row in training_by_entry.items():
         if entry_filter and entry_id not in entry_filter:
             continue
-        if row.get("af_status") != "ok":
+        if training_row.get("af_status") != "ok":
             continue
-        if not row.get("af_model_entity_ids"):
+        model_entity_ids = list(training_row.get("af_model_entity_ids") or [])
+        if not model_entity_ids:
             continue
-        selected_entry_ids.append(entry_id)
-        if args.limit is not None and len(selected_entry_ids) >= args.limit:
+        for model_entity_id in model_entity_ids:
+            fragment_row = fragment_index.get((entry_id, model_entity_id))
+            if fragment_row is None:
+                LOG.warning("Missing fragment row for entry=%s model=%s — skipping", entry_id, model_entity_id)
+                continue
+            tasks.append((entry_id, model_entity_id, training_row, fragment_row))
+        seen_entries.add(entry_id)
+        if args.limit is not None and len(seen_entries) >= args.limit:
             break
 
+    LOG.info("Task list built: %d fragments across %d entries", len(tasks), len(seen_entries))
+
+    # Resume: filter out already-completed fragments
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = args.output_dir / ".checkpoint"
+    done_keys = _load_checkpoint(checkpoint_path) if args.resume else set()
+    if done_keys:
+        LOG.info("Resume mode: %d fragments already done, skipping them", len(done_keys))
+    pending = [t for t in tasks if f"{t[0]}\t{t[1]}" not in done_keys]
+    LOG.info("Pending: %d fragments to process", len(pending))
+
+    if not pending:
+        LOG.info("Nothing to do.")
+        return {"entries": 0, "fragments": 0, "failures": 0, "output_dir": str(args.output_dir.resolve())}
+
+    # Setup parquet writers
     residue_writer = ParquetBatchWriter(args.output_dir / "residue_features.parquet", args.batch_size)
     edge_writer = ParquetBatchWriter(
         args.output_dir / "contact_graph_edges.parquet",
@@ -492,50 +583,110 @@ def run_extraction(args: argparse.Namespace) -> dict[str, Any]:
         max(args.batch_size // 4, 1),
     )
 
-    processed_entries = 0
+    failures: list[dict[str, str]] = []
     processed_fragments = 0
+    processed_entries: set[str] = set()
+
+    def _progress(iterable: Any, **kwargs: Any) -> Any:
+        if HAVE_TQDM:
+            return tqdm(iterable, **kwargs)
+        return iterable
+
+    def _handle_result(
+        entry_id: str,
+        model_entity_id: str,
+        residue_rows: list[dict[str, Any]] | None,
+        edge_rows: list[dict[str, Any]] | None,
+        frag_feat: dict[str, Any] | None,
+        error: str | None,
+    ) -> None:
+        nonlocal processed_fragments
+        if error is not None:
+            LOG.warning("FAILED %s / %s: %s", entry_id, model_entity_id, error)
+            failures.append({"entry_id": entry_id, "model_entity_id": model_entity_id, "error": error})
+            return
+        residue_writer.extend(residue_rows)  # type: ignore[arg-type]
+        edge_writer.extend(edge_rows)  # type: ignore[arg-type]
+        fragment_writer.add(frag_feat)  # type: ignore[arg-type]
+        processed_fragments += 1
+        processed_entries.add(entry_id)
+        if args.resume:
+            _append_checkpoint(checkpoint_path, entry_id, model_entity_id)
 
     try:
-        for entry_id in selected_entry_ids:
-            training_row = training_by_entry[entry_id]
-            model_entity_ids = list(training_row.get("af_model_entity_ids") or [])
-            for model_entity_id in model_entity_ids:
-                fragment_row = fragment_index.get((entry_id, model_entity_id))
-                if fragment_row is None:
-                    raise KeyError(
-                        f"Missing fragment manifest row for entry '{entry_id}' and model '{model_entity_id}'."
-                    )
-
-                residue_rows, edge_rows, fragment_features = extract_fragment_features(
-                    training_row=training_row,
-                    fragment_row=fragment_row,
-                    contact_threshold=args.contact_threshold,
-                    strict_contact_threshold=args.strict_contact_threshold,
+        if args.workers > 1:
+            LOG.info("Parallel mode: %d workers", args.workers)
+            with ProcessPoolExecutor(max_workers=args.workers) as executor:
+                future_to_key = {
+                    executor.submit(
+                        _extract_task,
+                        eid, mid, tr, fr,
+                        args.contact_threshold,
+                        args.strict_contact_threshold,
+                    ): (eid, mid)
+                    for eid, mid, tr, fr in pending
+                }
+                bar = _progress(
+                    as_completed(future_to_key),
+                    total=len(future_to_key),
+                    desc="Extracting",
+                    unit="frag",
+                    dynamic_ncols=True,
                 )
-                residue_writer.extend(residue_rows)
-                edge_writer.extend(edge_rows)
-                fragment_writer.add(fragment_features)
-                processed_fragments += 1
-
-            processed_entries += 1
+                for future in bar:
+                    eid, mid, res_rows, edge_rows, frag_feat, error = future.result()
+                    _handle_result(eid, mid, res_rows, edge_rows, frag_feat, error)
+                    if HAVE_TQDM and failures:
+                        bar.set_postfix(failures=len(failures))  # type: ignore[union-attr]
+        else:
+            bar = _progress(
+                pending,
+                total=len(pending),
+                desc="Extracting",
+                unit="frag",
+                dynamic_ncols=True,
+            )
+            for eid, mid, tr, fr in bar:
+                result = _extract_task(eid, mid, tr, fr, args.contact_threshold, args.strict_contact_threshold)
+                _handle_result(*result)
+                if HAVE_TQDM and failures:
+                    bar.set_postfix(failures=len(failures))  # type: ignore[union-attr]
     finally:
         residue_writer.close()
         edge_writer.close()
         fragment_writer.close()
 
+    # Write failures CSV
+    if failures:
+        failures_path = args.output_dir / "extraction_failures.csv"
+        with failures_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["entry_id", "model_entity_id", "error"])
+            writer.writeheader()
+            writer.writerows(failures)
+        LOG.warning("%d fragments failed — see %s", len(failures), failures_path)
+
     return {
-        "entries": processed_entries,
+        "entries": len(processed_entries),
         "fragments": processed_fragments,
+        "failures": len(failures),
         "output_dir": str(args.output_dir.resolve()),
     }
 
 
 def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+        datefmt="%H:%M:%S",
+    )
     args = parse_args(argv)
     summary = run_extraction(args)
-    print(
-        f"Extracted features for {summary['entries']} entries / {summary['fragments']} fragments "
-        f"into {summary['output_dir']}"
+    LOG.info(
+        "Done — %d entries / %d fragments extracted, %d failures → %s",
+        summary["entries"],
+        summary["fragments"],
+        summary["failures"],
+        summary["output_dir"],
     )
     return 0
 
