@@ -17,7 +17,7 @@ import json
 import logging
 import math
 from collections import Counter, defaultdict
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Iterable, Protocol
 
@@ -165,6 +165,18 @@ def parse_entry_filter(values: list[str] | None) -> set[str] | None:
 
 def read_parquet_rows(path: Path) -> list[dict[str, Any]]:
     return pq.read_table(path).to_pylist()
+
+
+def read_parquet_grouped(path: Path) -> dict[str, list[dict[str, Any]]]:
+    """Read a parquet file and group rows by entry_id without holding the full
+    Python list in memory after grouping."""
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for batch in pq.ParquetFile(path).iter_batches(batch_size=50_000):
+        for row in batch.to_pylist():
+            eid = str(row.get("entry_id", "")).strip()
+            if eid:
+                grouped[eid].append(row)
+    return grouped
 
 
 def canonical_residue_name(value: str | None) -> str:
@@ -505,9 +517,13 @@ def build_graph_cache(args: argparse.Namespace) -> dict[str, Any]:
 
     LOG.info("Loading parquet tables…")
     training_rows = read_parquet_rows(args.training_index)
-    fragment_rows_by_entry = group_rows_by_entry(read_parquet_rows(args.fragment_features))
-    residue_rows_by_entry = group_rows_by_entry(read_parquet_rows(args.residue_features))
-    edge_rows_by_entry = group_rows_by_entry(read_parquet_rows(args.edge_features))
+    LOG.info("Loading fragment features…")
+    fragment_rows_by_entry = read_parquet_grouped(args.fragment_features)
+    LOG.info("Loading residue features…")
+    residue_rows_by_entry = read_parquet_grouped(args.residue_features)
+    LOG.info("Loading edge features…")
+    edge_rows_by_entry = read_parquet_grouped(args.edge_features)
+    LOG.info("All tables loaded.")
 
     output_dir = args.output_dir
     graphs_dir = output_dir / "graphs"
@@ -567,24 +583,35 @@ def build_graph_cache(args: argparse.Namespace) -> dict[str, Any]:
         return tqdm(it, **kw) if HAVE_TQDM else it
 
     if args.workers > 1:
-        LOG.info("Parallel mode: %d workers", args.workers)
+        max_inflight = args.workers * 32
+        LOG.info("Parallel mode: %d workers, max %d tasks in-flight", args.workers, max_inflight)
+        pending_iter = iter(tasks)
+        in_flight: dict = {}
+        bar = tqdm(total=len(tasks), desc="Building graphs", unit="entry", dynamic_ncols=True) if HAVE_TQDM else None
+
+        def _submit_one() -> None:
+            task = next(pending_iter, None)
+            if task is None:
+                return
+            f = executor.submit(_build_and_save_graph, *task)
+            in_flight[f] = str(task[0].get("entry_id") or "")
+
         with ProcessPoolExecutor(max_workers=args.workers) as executor:
-            future_to_id = {
-                executor.submit(_build_and_save_graph, *task): str(task[0].get("entry_id") or "")
-                for task in tasks
-            }
-            bar = _progress(
-                as_completed(future_to_id),
-                total=len(future_to_id),
-                desc="Building graphs",
-                unit="entry",
-                dynamic_ncols=True,
-            )
-            for future in bar:
-                eid, entry_info, error = future.result()
-                _handle(eid, entry_info, error)
-                if HAVE_TQDM and failures:
-                    bar.set_postfix(failures=len(failures))  # type: ignore[union-attr]
+            for _ in range(min(max_inflight, len(tasks))):
+                _submit_one()
+            while in_flight:
+                done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+                for future in done:
+                    in_flight.pop(future)
+                    eid, entry_info, error = future.result()
+                    _handle(eid, entry_info, error)
+                    if bar is not None:
+                        bar.update(1)
+                        if failures:
+                            bar.set_postfix(failures=len(failures))
+                    _submit_one()
+        if bar is not None:
+            bar.close()
     else:
         bar = _progress(tasks, total=len(tasks), desc="Building graphs", unit="entry", dynamic_ncols=True)
         for task in bar:
