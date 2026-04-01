@@ -22,6 +22,8 @@ from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Iterable, Protocol
 
+import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 try:
@@ -192,15 +194,24 @@ def read_parquet_grouped_filtered(
 ) -> dict[str, list[dict[str, Any]]]:
     """Read a parquet file, keeping only rows whose entry_id is in *entry_ids*.
 
-    Streams the file in batches so peak memory scales with the size of the
-    requested subset rather than the full file.  If *desc* is given and tqdm
-    is available, a nested progress bar is shown for the row-group scan.
+    Uses Arrow-native vectorized filtering (``pc.is_in``) in C++ rather than
+    per-row Python dict lookups.  Only the matching rows are converted to
+    Python objects, so both CPU time and peak memory scale with the fraction
+    of the file that matches (typically < 1% per batch) rather than the full
+    file size.
+
+    If *desc* is given and tqdm is available, a nested progress bar is shown.
     """
     pf = pq.ParquetFile(path)
     num_groups = pf.metadata.num_row_groups
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
-    batches = pf.iter_batches(batch_size=50_000)
+    # Build an Arrow array once for vectorized is_in checks.
+    # Use large_string to avoid 2 GB string column limit on big files.
+    entry_ids_arr = pa.array(sorted(entry_ids), type=pa.large_string())
+
+    # Larger batches → fewer Python round-trips.
+    batches = pf.iter_batches(batch_size=200_000)
     if HAVE_TQDM and desc is not None:
         batches = tqdm(
             batches,
@@ -211,11 +222,19 @@ def read_parquet_grouped_filtered(
             dynamic_ncols=True,
         )
 
-    for batch in batches:
-        for row in batch.to_pylist():
+    for arrow_batch in batches:
+        # Vectorized C++ filter — vastly faster than Python-level dict lookup.
+        eid_col = arrow_batch.column("entry_id").cast(pa.large_string())
+        mask = pc.is_in(eid_col, value_set=entry_ids_arr)
+        if pc.sum(mask).as_py() == 0:
+            continue  # entire batch has no matching entries — skip to_pylist()
+        filtered = arrow_batch.filter(mask)
+        # Only convert the matched subset (~0.4 % of rows) to Python.
+        for row in filtered.to_pylist():
             eid = str(row.get("entry_id", "")).strip()
-            if eid and eid in entry_ids:
+            if eid:
                 grouped[eid].append(row)
+
     return dict(grouped)
 
 
