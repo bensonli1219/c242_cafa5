@@ -583,15 +583,31 @@ def run_extraction(args: argparse.Namespace) -> dict[str, Any]:
 
     # Resume: replay existing parquet rows into writers so they are preserved
     if args.resume:
+        parquet_ok = True
         for path, writer, label in [
             (residue_path,  residue_writer,  "residue"),
             (edge_path,     edge_writer,     "edge"),
             (fragment_path, fragment_writer, "fragment"),
         ]:
-            if path.exists():
+            if not path.exists():
+                continue
+            try:
                 existing_rows = pq.read_table(path).to_pylist()
                 writer.extend(existing_rows)
                 LOG.info("Resume: loaded %d existing %s rows", len(existing_rows), label)
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning(
+                    "Existing %s parquet is corrupted (%s). "
+                    "Clearing checkpoint — affected fragments will be reprocessed.",
+                    label, exc,
+                )
+                parquet_ok = False
+
+        if not parquet_ok and checkpoint_path.exists():
+            checkpoint_path.unlink()
+            done_keys = set()
+            pending = tasks
+            LOG.warning("Checkpoint cleared. All %d fragments will be reprocessed.", len(pending))
 
     failures: list[dict[str, str]] = []
     processed_fragments = 0
