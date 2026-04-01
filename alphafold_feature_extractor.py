@@ -19,7 +19,7 @@ import argparse
 import csv
 import logging
 import math
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -95,6 +95,16 @@ class ParquetBatchWriter:
     def extend(self, rows: Iterable[dict[str, Any]]) -> None:
         for row in rows:
             self.add(row)
+
+    def extend_from_table(self, table: pa.Table) -> None:
+        """Write an Arrow table directly without converting to Python dicts."""
+        if table.num_rows == 0:
+            return
+        pipeline.ensure_parent(self.path)
+        if self.writer is None:
+            self.writer = pq.ParquetWriter(self.path, table.schema)
+        for batch in table.to_batches(max_chunksize=self.batch_size * 10):
+            self.writer.write_batch(batch)
 
     def flush(self) -> None:
         if not self.rows:
@@ -592,9 +602,10 @@ def run_extraction(args: argparse.Namespace) -> dict[str, Any]:
             if not path.exists():
                 continue
             try:
-                existing_rows = pq.read_table(path).to_pylist()
-                writer.extend(existing_rows)
-                LOG.info("Resume: loaded %d existing %s rows", len(existing_rows), label)
+                existing_table = pq.read_table(path)
+                writer.extend_from_table(existing_table)
+                LOG.info("Resume: loaded %d existing %s rows", existing_table.num_rows, label)
+                del existing_table
             except Exception as exc:  # noqa: BLE001
                 LOG.warning(
                     "Existing %s parquet is corrupted (%s). "
@@ -641,29 +652,38 @@ def run_extraction(args: argparse.Namespace) -> dict[str, Any]:
 
     try:
         if args.workers > 1:
-            LOG.info("Parallel mode: %d workers", args.workers)
-            with ProcessPoolExecutor(max_workers=args.workers) as executor:
-                future_to_key = {
-                    executor.submit(
-                        _extract_task,
-                        eid, mid, tr, fr,
-                        args.contact_threshold,
-                        args.strict_contact_threshold,
-                    ): (eid, mid)
-                    for eid, mid, tr, fr in pending
-                }
-                bar = _progress(
-                    as_completed(future_to_key),
-                    total=len(future_to_key),
-                    desc="Extracting",
-                    unit="frag",
-                    dynamic_ncols=True,
+            max_inflight = args.workers * 32
+            LOG.info("Parallel mode: %d workers, max %d tasks in-flight", args.workers, max_inflight)
+            pending_iter = iter(pending)
+            in_flight: dict = {}
+            bar = _progress(total=len(pending), desc="Extracting", unit="frag", dynamic_ncols=True)
+
+            def _submit_one() -> None:
+                task = next(pending_iter, None)
+                if task is None:
+                    return
+                eid, mid, tr, fr = task
+                f = executor.submit(
+                    _extract_task, eid, mid, tr, fr,
+                    args.contact_threshold, args.strict_contact_threshold,
                 )
-                for future in bar:
-                    eid, mid, res_rows, edge_rows, frag_feat, error = future.result()
-                    _handle_result(eid, mid, res_rows, edge_rows, frag_feat, error)
-                    if HAVE_TQDM and failures:
-                        bar.set_postfix(failures=len(failures))  # type: ignore[union-attr]
+                in_flight[f] = (eid, mid)
+
+            with ProcessPoolExecutor(max_workers=args.workers) as executor:
+                for _ in range(min(max_inflight, len(pending))):
+                    _submit_one()
+                while in_flight:
+                    done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        in_flight.pop(future)
+                        eid, mid, res_rows, edge_rows, frag_feat, error = future.result()
+                        _handle_result(eid, mid, res_rows, edge_rows, frag_feat, error)
+                        if HAVE_TQDM:
+                            bar.update(1)  # type: ignore[union-attr]
+                            if failures:
+                                bar.set_postfix(failures=len(failures))  # type: ignore[union-attr]
+                        _submit_one()
+            bar.close()  # type: ignore[union-attr]
         else:
             bar = _progress(
                 pending,
