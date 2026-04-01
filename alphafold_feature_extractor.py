@@ -656,7 +656,7 @@ def run_extraction(args: argparse.Namespace) -> dict[str, Any]:
             LOG.info("Parallel mode: %d workers, max %d tasks in-flight", args.workers, max_inflight)
             pending_iter = iter(pending)
             in_flight: dict = {}
-            bar = _progress(total=len(pending), desc="Extracting", unit="frag", dynamic_ncols=True)
+            bar = tqdm(total=len(pending), desc="Extracting", unit="frag", dynamic_ncols=True) if HAVE_TQDM else None
 
             def _submit_one() -> None:
                 task = next(pending_iter, None)
@@ -678,12 +678,13 @@ def run_extraction(args: argparse.Namespace) -> dict[str, Any]:
                         in_flight.pop(future)
                         eid, mid, res_rows, edge_rows, frag_feat, error = future.result()
                         _handle_result(eid, mid, res_rows, edge_rows, frag_feat, error)
-                        if HAVE_TQDM:
-                            bar.update(1)  # type: ignore[union-attr]
+                        if bar is not None:
+                            bar.update(1)
                             if failures:
-                                bar.set_postfix(failures=len(failures))  # type: ignore[union-attr]
+                                bar.set_postfix(failures=len(failures))
                         _submit_one()
-            bar.close()  # type: ignore[union-attr]
+            if bar is not None:
+                bar.close()
         else:
             bar = _progress(
                 pending,
