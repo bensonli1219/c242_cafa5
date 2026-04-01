@@ -573,15 +573,25 @@ def run_extraction(args: argparse.Namespace) -> dict[str, Any]:
         return {"entries": 0, "fragments": 0, "failures": 0, "output_dir": str(args.output_dir.resolve())}
 
     # Setup parquet writers
-    residue_writer = ParquetBatchWriter(args.output_dir / "residue_features.parquet", args.batch_size)
-    edge_writer = ParquetBatchWriter(
-        args.output_dir / "contact_graph_edges.parquet",
-        max(args.batch_size // 2, 1),
-    )
-    fragment_writer = ParquetBatchWriter(
-        args.output_dir / "fragment_features.parquet",
-        max(args.batch_size // 4, 1),
-    )
+    residue_path   = args.output_dir / "residue_features.parquet"
+    edge_path      = args.output_dir / "contact_graph_edges.parquet"
+    fragment_path  = args.output_dir / "fragment_features.parquet"
+
+    residue_writer  = ParquetBatchWriter(residue_path,  args.batch_size)
+    edge_writer     = ParquetBatchWriter(edge_path,     max(args.batch_size // 2, 1))
+    fragment_writer = ParquetBatchWriter(fragment_path, max(args.batch_size // 4, 1))
+
+    # Resume: replay existing parquet rows into writers so they are preserved
+    if args.resume:
+        for path, writer, label in [
+            (residue_path,  residue_writer,  "residue"),
+            (edge_path,     edge_writer,     "edge"),
+            (fragment_path, fragment_writer, "fragment"),
+        ]:
+            if path.exists():
+                existing_rows = pq.read_table(path).to_pylist()
+                writer.extend(existing_rows)
+                LOG.info("Resume: loaded %d existing %s rows", len(existing_rows), label)
 
     failures: list[dict[str, str]] = []
     processed_fragments = 0
