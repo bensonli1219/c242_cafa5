@@ -12,15 +12,26 @@ later without changing the dataset API.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import logging
 import math
 from collections import Counter, defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Iterable, Protocol
 
 import pyarrow.parquet as pq
 
+try:
+    from tqdm import tqdm
+    HAVE_TQDM = True
+except ImportError:
+    HAVE_TQDM = False
+
 import cafa5_alphafold_pipeline as pipeline
+
+LOG = logging.getLogger(__name__)
 
 try:  # pragma: no cover - optional dependency in the default py313 env
     import torch
@@ -126,6 +137,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--limit", type=positive_int, default=None)
     parser.add_argument("--min-term-frequency", type=positive_int, default=1)
+    parser.add_argument(
+        "--workers",
+        type=positive_int,
+        default=1,
+        help="Number of parallel worker processes (default: 1 = serial).",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip entries whose .pt file already exists.",
+    )
     return parser.parse_args(argv)
 
 
@@ -446,18 +468,46 @@ def tensorize_graph_record(graph_record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _build_and_save_graph(
+    training_row: dict[str, Any],
+    fragment_rows: list[dict[str, Any]],
+    residue_rows: list[dict[str, Any]],
+    edge_rows: list[dict[str, Any]],
+    graph_path: str,
+) -> tuple[str, dict[str, Any] | None, str | None]:
+    """Module-level worker for ProcessPoolExecutor."""
+    entry_id = str(training_row.get("entry_id") or "")
+    try:
+        graph_record = build_protein_graph_record(
+            training_row=training_row,
+            fragment_rows=fragment_rows,
+            residue_rows=residue_rows,
+            edge_rows=edge_rows,
+        )
+        tensor_payload = tensorize_graph_record(graph_record)
+        require_torch().save(tensor_payload, Path(graph_path))
+        entry_info = {
+            "entry_id": entry_id,
+            "taxonomy_id": graph_record["taxonomy_id"],
+            "graph_path": graph_path,
+            "fragment_count": len(graph_record["fragment_ids"]),
+            "residue_count": len(graph_record["cafa_residue_index"]),
+            "labels": graph_record["labels"],
+        }
+        return entry_id, entry_info, None
+    except Exception as exc:  # noqa: BLE001
+        return entry_id, None, f"{type(exc).__name__}: {exc}"
+
+
 def build_graph_cache(args: argparse.Namespace) -> dict[str, Any]:
-    torch_module = require_torch()
+    require_torch()
     entry_filter = parse_entry_filter(args.entry_ids)
 
+    LOG.info("Loading parquet tables…")
     training_rows = read_parquet_rows(args.training_index)
-    fragment_rows = read_parquet_rows(args.fragment_features)
-    residue_rows = read_parquet_rows(args.residue_features)
-    edge_rows = read_parquet_rows(args.edge_features)
-
-    fragment_rows_by_entry = group_rows_by_entry(fragment_rows)
-    residue_rows_by_entry = group_rows_by_entry(residue_rows)
-    edge_rows_by_entry = group_rows_by_entry(edge_rows)
+    fragment_rows_by_entry = group_rows_by_entry(read_parquet_rows(args.fragment_features))
+    residue_rows_by_entry = group_rows_by_entry(read_parquet_rows(args.residue_features))
+    edge_rows_by_entry = group_rows_by_entry(read_parquet_rows(args.edge_features))
 
     output_dir = args.output_dir
     graphs_dir = output_dir / "graphs"
@@ -465,10 +515,17 @@ def build_graph_cache(args: argparse.Namespace) -> dict[str, Any]:
     pipeline.ensure_parent(graphs_dir / "placeholder")
     pipeline.ensure_parent(metadata_dir / "placeholder")
 
-    graph_entries: list[dict[str, Any]] = []
-    kept_training_rows: list[dict[str, Any]] = []
+    # Resume: load existing entries index
+    entries_json_path = metadata_dir / "entries.json"
+    existing_entries: dict[str, dict[str, Any]] = {}
+    if args.resume and entries_json_path.exists():
+        for entry in load_json(entries_json_path):
+            existing_entries[entry["entry_id"]] = entry
+        LOG.info("Resume: %d existing entries found", len(existing_entries))
 
-    processed = 0
+    # Build task list
+    training_rows_by_entry: dict[str, dict[str, Any]] = {}
+    tasks: list[tuple] = []
     for training_row in training_rows:
         entry_id = str(training_row.get("entry_id") or "")
         if not entry_id:
@@ -479,32 +536,78 @@ def build_graph_cache(args: argparse.Namespace) -> dict[str, Any]:
             continue
         if entry_id not in residue_rows_by_entry:
             continue
-
-        graph_record = build_protein_graph_record(
-            training_row=training_row,
-            fragment_rows=fragment_rows_by_entry.get(entry_id, []),
-            residue_rows=residue_rows_by_entry[entry_id],
-            edge_rows=edge_rows_by_entry.get(entry_id, []),
-        )
-        tensor_payload = tensorize_graph_record(graph_record)
-        graph_path = graphs_dir / f"{entry_id}.pt"
-        torch_module.save(tensor_payload, graph_path)
-
-        graph_entries.append(
-            {
-                "entry_id": entry_id,
-                "taxonomy_id": graph_record["taxonomy_id"],
-                "graph_path": str(graph_path.resolve()),
-                "fragment_count": len(graph_record["fragment_ids"]),
-                "residue_count": len(graph_record["cafa_residue_index"]),
-                "labels": graph_record["labels"],
-            }
-        )
-        kept_training_rows.append(training_row)
-        processed += 1
-        if args.limit is not None and processed >= args.limit:
+        training_rows_by_entry[entry_id] = training_row
+        graph_path = str((graphs_dir / f"{entry_id}.pt").resolve())
+        if args.resume and entry_id in existing_entries and Path(graph_path).exists():
+            continue  # already done
+        tasks.append((
+            training_row,
+            fragment_rows_by_entry.get(entry_id, []),
+            residue_rows_by_entry[entry_id],
+            edge_rows_by_entry.get(entry_id, []),
+            graph_path,
+        ))
+        if args.limit is not None and len(tasks) + len(existing_entries) >= args.limit:
             break
 
+    LOG.info("Pending: %d graphs to build (%d already done)", len(tasks), len(existing_entries))
+
+    # Process
+    graph_entries: list[dict[str, Any]] = list(existing_entries.values())
+    failures: list[dict[str, str]] = []
+
+    def _handle(entry_id: str, entry_info: dict | None, error: str | None) -> None:
+        if error is not None:
+            LOG.warning("FAILED %s: %s", entry_id, error)
+            failures.append({"entry_id": entry_id, "error": error})
+            return
+        graph_entries.append(entry_info)  # type: ignore[arg-type]
+
+    def _progress(it: Any, **kw: Any) -> Any:
+        return tqdm(it, **kw) if HAVE_TQDM else it
+
+    if args.workers > 1:
+        LOG.info("Parallel mode: %d workers", args.workers)
+        with ProcessPoolExecutor(max_workers=args.workers) as executor:
+            future_to_id = {
+                executor.submit(_build_and_save_graph, *task): str(task[0].get("entry_id") or "")
+                for task in tasks
+            }
+            bar = _progress(
+                as_completed(future_to_id),
+                total=len(future_to_id),
+                desc="Building graphs",
+                unit="entry",
+                dynamic_ncols=True,
+            )
+            for future in bar:
+                eid, entry_info, error = future.result()
+                _handle(eid, entry_info, error)
+                if HAVE_TQDM and failures:
+                    bar.set_postfix(failures=len(failures))  # type: ignore[union-attr]
+    else:
+        bar = _progress(tasks, total=len(tasks), desc="Building graphs", unit="entry", dynamic_ncols=True)
+        for task in bar:
+            eid, entry_info, error = _build_and_save_graph(*task)
+            _handle(eid, entry_info, error)
+            if HAVE_TQDM and failures:
+                bar.set_postfix(failures=len(failures))  # type: ignore[union-attr]
+
+    # Write failures CSV
+    if failures:
+        failures_path = output_dir / "graph_build_failures.csv"
+        with failures_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["entry_id", "error"])
+            writer.writeheader()
+            writer.writerows(failures)
+        LOG.warning("%d graphs failed — see %s", len(failures), failures_path)
+
+    # Write metadata
+    kept_training_rows = [
+        training_rows_by_entry[e["entry_id"]]
+        for e in graph_entries
+        if e["entry_id"] in training_rows_by_entry
+    ]
     term_counts = build_term_counts(kept_training_rows)
     vocab_dir = metadata_dir / "vocabs"
     pipeline.ensure_parent(vocab_dir / "placeholder")
@@ -512,14 +615,10 @@ def build_graph_cache(args: argparse.Namespace) -> dict[str, Any]:
         vocab = build_vocab(term_counts[aspect], min_term_frequency=args.min_term_frequency)
         write_json(
             vocab_dir / f"{aspect}.json",
-            {
-                "aspect": aspect,
-                "min_term_frequency": args.min_term_frequency,
-                "terms": vocab,
-            },
+            {"aspect": aspect, "min_term_frequency": args.min_term_frequency, "terms": vocab},
         )
 
-    write_json(metadata_dir / "entries.json", graph_entries)
+    write_json(entries_json_path, graph_entries)
     write_json(metadata_dir / "term_counts.json", term_counts)
     write_json(
         metadata_dir / "schema.json",
@@ -551,6 +650,7 @@ def build_graph_cache(args: argparse.Namespace) -> dict[str, Any]:
 
     return {
         "entries": len(graph_entries),
+        "failures": len(failures),
         "output_dir": str(output_dir.resolve()),
     }
 
@@ -764,10 +864,18 @@ class CafaDGLDataset(_BaseCafaGraphDataset):
 
 
 def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+        datefmt="%H:%M:%S",
+    )
     args = parse_args(argv)
     summary = build_graph_cache(args)
-    print(
-        f"Built graph caches for {summary['entries']} entries into {summary['output_dir']}"
+    LOG.info(
+        "Done — %d entries built, %d failures → %s",
+        summary["entries"],
+        summary["failures"],
+        summary["output_dir"],
     )
     return 0
 
