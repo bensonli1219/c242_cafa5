@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import json
 import logging
 import math
@@ -148,6 +149,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Skip entries whose .pt file already exists.",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=positive_int,
+        default=500,
+        help="Number of entries to load from parquet at once (default: 500). "
+             "Lower values reduce peak memory at the cost of more I/O.",
+    )
     return parser.parse_args(argv)
 
 
@@ -177,6 +185,38 @@ def read_parquet_grouped(path: Path) -> dict[str, list[dict[str, Any]]]:
             if eid:
                 grouped[eid].append(row)
     return grouped
+
+
+def read_parquet_grouped_filtered(
+    path: Path, entry_ids: set[str], desc: str | None = None
+) -> dict[str, list[dict[str, Any]]]:
+    """Read a parquet file, keeping only rows whose entry_id is in *entry_ids*.
+
+    Streams the file in batches so peak memory scales with the size of the
+    requested subset rather than the full file.  If *desc* is given and tqdm
+    is available, a nested progress bar is shown for the row-group scan.
+    """
+    pf = pq.ParquetFile(path)
+    num_groups = pf.metadata.num_row_groups
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    batches = pf.iter_batches(batch_size=50_000)
+    if HAVE_TQDM and desc is not None:
+        batches = tqdm(
+            batches,
+            total=num_groups,
+            desc=desc,
+            unit="rg",
+            leave=False,
+            dynamic_ncols=True,
+        )
+
+    for batch in batches:
+        for row in batch.to_pylist():
+            eid = str(row.get("entry_id", "")).strip()
+            if eid and eid in entry_ids:
+                grouped[eid].append(row)
+    return dict(grouped)
 
 
 def canonical_residue_name(value: str | None) -> str:
@@ -511,19 +551,77 @@ def _build_and_save_graph(
         return entry_id, None, f"{type(exc).__name__}: {exc}"
 
 
+def _process_tasks(
+    tasks: list[tuple],
+    graph_entries: list[dict[str, Any]],
+    failures: list[dict[str, str]],
+    workers: int,
+    bar: Any,
+) -> None:
+    """Run a list of build tasks, updating *graph_entries* and *failures* in-place."""
+
+    def _handle(entry_id: str, entry_info: dict | None, error: str | None) -> None:
+        if error is not None:
+            LOG.warning("FAILED %s: %s", entry_id, error)
+            failures.append({"entry_id": entry_id, "error": error})
+            return
+        graph_entries.append(entry_info)  # type: ignore[arg-type]
+
+    if workers > 1:
+        # Keep in-flight window small: workers * 4 avoids pickling hundreds of
+        # large residue/edge row lists simultaneously.
+        max_inflight = workers * 4
+        pending_iter = iter(tasks)
+        in_flight: dict = {}
+
+        def _submit_one() -> None:
+            task = next(pending_iter, None)
+            if task is None:
+                return
+            f = executor.submit(_build_and_save_graph, *task)
+            in_flight[f] = str(task[0].get("entry_id") or "")
+
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            for _ in range(min(max_inflight, len(tasks))):
+                _submit_one()
+            while in_flight:
+                done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+                for future in done:
+                    in_flight.pop(future)
+                    eid, entry_info, error = future.result()
+                    _handle(eid, entry_info, error)
+                    if bar is not None:
+                        bar.update(1)
+                        if failures:
+                            bar.set_postfix(failures=len(failures))
+                    _submit_one()
+    else:
+        for task in tasks:
+            eid, entry_info, error = _build_and_save_graph(*task)
+            _handle(eid, entry_info, error)
+            if bar is not None:
+                bar.update(1)
+                if failures:
+                    bar.set_postfix(failures=len(failures))
+
+
 def build_graph_cache(args: argparse.Namespace) -> dict[str, Any]:
+    """Build protein graph cache using streaming batch I/O to bound peak memory.
+
+    Instead of loading all three parquet tables upfront, we:
+    1. Read only the training index (small, ~100 K rows).
+    2. Divide the pending entry list into batches of ``args.batch_size``.
+    3. For each batch, stream-filter the three feature parquets to load only
+       the rows belonging to that batch, process them, write the .pt files,
+       then release memory with an explicit ``gc.collect()`` before the next
+       batch.
+
+    This keeps peak memory proportional to batch_size rather than the full
+    dataset, at the cost of scanning each parquet file once per batch.
+    """
     require_torch()
     entry_filter = parse_entry_filter(args.entry_ids)
-
-    LOG.info("Loading parquet tables…")
-    training_rows = read_parquet_rows(args.training_index)
-    LOG.info("Loading fragment features…")
-    fragment_rows_by_entry = read_parquet_grouped(args.fragment_features)
-    LOG.info("Loading residue features…")
-    residue_rows_by_entry = read_parquet_grouped(args.residue_features)
-    LOG.info("Loading edge features…")
-    edge_rows_by_entry = read_parquet_grouped(args.edge_features)
-    LOG.info("All tables loaded.")
+    batch_size: int = args.batch_size
 
     output_dir = args.output_dir
     graphs_dir = output_dir / "graphs"
@@ -539,9 +637,13 @@ def build_graph_cache(args: argparse.Namespace) -> dict[str, Any]:
             existing_entries[entry["entry_id"]] = entry
         LOG.info("Resume: %d existing entries found", len(existing_entries))
 
-    # Build task list
+    # Pass 1: load training index only (small) and build the ordered pending list.
+    LOG.info("Loading training index…")
+    training_rows = read_parquet_rows(args.training_index)
+
     training_rows_by_entry: dict[str, dict[str, Any]] = {}
-    tasks: list[tuple] = []
+    pending_entries: list[tuple[str, dict[str, Any], str]] = []  # (entry_id, row, graph_path)
+
     for training_row in training_rows:
         entry_id = str(training_row.get("entry_id") or "")
         if not entry_id:
@@ -550,75 +652,108 @@ def build_graph_cache(args: argparse.Namespace) -> dict[str, Any]:
             continue
         if training_row.get("af_status") != "ok":
             continue
-        if entry_id not in residue_rows_by_entry:
-            continue
         training_rows_by_entry[entry_id] = training_row
         graph_path = str((graphs_dir / f"{entry_id}.pt").resolve())
         if args.resume and entry_id in existing_entries and Path(graph_path).exists():
             continue  # already done
-        tasks.append((
-            training_row,
-            fragment_rows_by_entry.get(entry_id, []),
-            residue_rows_by_entry[entry_id],
-            edge_rows_by_entry.get(entry_id, []),
-            graph_path,
-        ))
-        if args.limit is not None and len(tasks) + len(existing_entries) >= args.limit:
+        pending_entries.append((entry_id, training_row, graph_path))
+        if args.limit is not None and len(pending_entries) + len(existing_entries) >= args.limit:
             break
 
-    LOG.info("Pending: %d graphs to build (%d already done)", len(tasks), len(existing_entries))
+    LOG.info(
+        "Pending: %d graphs to build (%d already done) — batch_size=%d",
+        len(pending_entries), len(existing_entries), batch_size,
+    )
 
-    # Process
+    # Pass 2: process in batches.
     graph_entries: list[dict[str, Any]] = list(existing_entries.values())
     failures: list[dict[str, str]] = []
 
-    def _handle(entry_id: str, entry_info: dict | None, error: str | None) -> None:
-        if error is not None:
-            LOG.warning("FAILED %s: %s", entry_id, error)
-            failures.append({"entry_id": entry_id, "error": error})
-            return
-        graph_entries.append(entry_info)  # type: ignore[arg-type]
+    total_pending = len(pending_entries)
+    num_batches = math.ceil(total_pending / batch_size) if total_pending else 0
 
-    def _progress(it: Any, **kw: Any) -> Any:
-        return tqdm(it, **kw) if HAVE_TQDM else it
+    # Outer bar: one tick per batch (tracks I/O + build together).
+    batch_bar = (
+        tqdm(total=num_batches, desc="Batches", unit="batch", dynamic_ncols=True, position=0)
+        if HAVE_TQDM else None
+    )
+    # Inner bar: one tick per entry (tracks graph building across all batches).
+    entry_bar = (
+        tqdm(total=total_pending, desc="Graphs built", unit="entry", dynamic_ncols=True, position=1)
+        if HAVE_TQDM else None
+    )
 
-    if args.workers > 1:
-        max_inflight = args.workers * 32
-        LOG.info("Parallel mode: %d workers, max %d tasks in-flight", args.workers, max_inflight)
-        pending_iter = iter(tasks)
-        in_flight: dict = {}
-        bar = tqdm(total=len(tasks), desc="Building graphs", unit="entry", dynamic_ncols=True) if HAVE_TQDM else None
+    def _set_stage(stage: str) -> None:
+        if batch_bar is not None:
+            batch_bar.set_postfix(stage=stage)
 
-        def _submit_one() -> None:
-            task = next(pending_iter, None)
-            if task is None:
-                return
-            f = executor.submit(_build_and_save_graph, *task)
-            in_flight[f] = str(task[0].get("entry_id") or "")
+    for batch_idx in range(num_batches):
+        batch = pending_entries[batch_idx * batch_size : (batch_idx + 1) * batch_size]
+        batch_entry_ids: set[str] = {eid for eid, _, _ in batch}
 
-        with ProcessPoolExecutor(max_workers=args.workers) as executor:
-            for _ in range(min(max_inflight, len(tasks))):
-                _submit_one()
-            while in_flight:
-                done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
-                for future in done:
-                    in_flight.pop(future)
-                    eid, entry_info, error = future.result()
-                    _handle(eid, entry_info, error)
-                    if bar is not None:
-                        bar.update(1)
-                        if failures:
-                            bar.set_postfix(failures=len(failures))
-                    _submit_one()
-        if bar is not None:
-            bar.close()
-    else:
-        bar = _progress(tasks, total=len(tasks), desc="Building graphs", unit="entry", dynamic_ncols=True)
-        for task in bar:
-            eid, entry_info, error = _build_and_save_graph(*task)
-            _handle(eid, entry_info, error)
-            if HAVE_TQDM and failures:
-                bar.set_postfix(failures=len(failures))  # type: ignore[union-attr]
+        LOG.info(
+            "Batch %d/%d: loading parquet data for %d entries…",
+            batch_idx + 1, num_batches, len(batch),
+        )
+
+        # Stream-filter each parquet — only rows for this batch are kept.
+        # Nested tqdm bars show row-group scan progress for each file.
+        _set_stage("loading fragment features")
+        fragment_rows_by_entry = read_parquet_grouped_filtered(
+            args.fragment_features, batch_entry_ids,
+            desc=f"  fragment [{batch_idx+1}/{num_batches}]",
+        )
+
+        _set_stage("loading residue features")
+        residue_rows_by_entry = read_parquet_grouped_filtered(
+            args.residue_features, batch_entry_ids,
+            desc=f"  residue  [{batch_idx+1}/{num_batches}]",
+        )
+
+        _set_stage("loading edge features")
+        edge_rows_by_entry = read_parquet_grouped_filtered(
+            args.edge_features, batch_entry_ids,
+            desc=f"  edges    [{batch_idx+1}/{num_batches}]",
+        )
+
+        # Build tasks for entries that have residue data.
+        _set_stage("building graphs")
+        tasks: list[tuple] = []
+        for entry_id, training_row, graph_path in batch:
+            if entry_id not in residue_rows_by_entry:
+                LOG.warning("No residue rows for %s — skipping", entry_id)
+                continue
+            tasks.append((
+                training_row,
+                fragment_rows_by_entry.get(entry_id, []),
+                residue_rows_by_entry[entry_id],
+                edge_rows_by_entry.get(entry_id, []),
+                graph_path,
+            ))
+
+        _process_tasks(tasks, graph_entries, failures, args.workers, entry_bar)
+
+        # Checkpoint: write entries.json after every batch so --resume can
+        # recover without re-processing completed entries if the job is killed.
+        _set_stage("checkpointing")
+        write_json(entries_json_path, graph_entries)
+
+        if batch_bar is not None:
+            batch_bar.set_postfix(
+                stage="done",
+                entries=len(graph_entries),
+                failures=len(failures),
+            )
+            batch_bar.update(1)
+
+        # Explicitly release batch data before loading the next batch.
+        del fragment_rows_by_entry, residue_rows_by_entry, edge_rows_by_entry, tasks
+        gc.collect()
+
+    if batch_bar is not None:
+        batch_bar.close()
+    if entry_bar is not None:
+        entry_bar.close()
 
     # Write failures CSV
     if failures:
