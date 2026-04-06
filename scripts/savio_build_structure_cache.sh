@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=build_structure_cache
 #SBATCH --account=ic_chem242
-#SBATCH --partition=savio2_htc
+#SBATCH --partition=savio2
 #SBATCH --qos=savio_normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
