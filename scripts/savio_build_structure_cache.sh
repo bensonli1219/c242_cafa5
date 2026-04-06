@@ -53,7 +53,10 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   exit 1
 fi
 
-export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
 export PYTHONUNBUFFERED=1
 
 echo "PYTHON_BIN=$PYTHON_BIN"
@@ -66,6 +69,7 @@ if [[ "$USE_CONDA" == "1" ]]; then
   echo "CONDA_PREFIX=${CONDA_PREFIX:-}"
 fi
 echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}"
+echo "SLURM_CPUS_PER_TASK=${SLURM_CPUS_PER_TASK:-}"
 
 "$PYTHON_BIN" -c "import sys; print('python_executable=' + sys.executable)"
 "$PYTHON_BIN" -c "import mdtraj; print('mdtraj ok')"
@@ -75,4 +79,5 @@ command -v freesasa && echo "freesasa found" || echo "freesasa not found; builde
 "$PYTHON_BIN" -u "$REPO_ROOT/build_structure_cache.py" \
     --fragment-manifest "$RUN_ROOT/manifests/alphafold_fragments.parquet" \
     --output-dir "$RUN_ROOT/graph_cache/modality_cache/structure" \
+    --workers "${SLURM_CPUS_PER_TASK:-1}" \
     --resume

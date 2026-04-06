@@ -15,6 +15,8 @@ caches later without any API changes.
 from __future__ import annotations
 
 import argparse
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 import json
 import math
 import shutil
@@ -40,6 +42,7 @@ DEFAULT_ESM2_MODEL = "facebook/esm2_t30_150M_UR50D"
 DEFAULT_MAX_RESIDUES_PER_CHUNK = 1000
 DEFAULT_CHUNK_OVERLAP = 128
 DEFAULT_PROGRESS_EVERY = 100
+DEFAULT_STRUCTURE_MAX_INFLIGHT_PER_WORKER = 4
 
 SS3_ORDER = ("helix", "sheet", "coil")
 HELIX_CODES = {"H", "G", "I"}
@@ -135,6 +138,7 @@ def parse_structure_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--entry-ids", nargs="*", default=None)
     parser.add_argument("--limit", type=positive_int, default=None)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--workers", type=positive_int, default=1)
     parser.add_argument("--mkdssp-exe", default="mkdssp")
     parser.add_argument("--freesasa-exe", default="freesasa")
     return parser.parse_args(argv)
@@ -883,6 +887,54 @@ def build_structure_cache_payload(
     return payload
 
 
+def process_structure_fragment_task(
+    index: int,
+    fragment_row: dict[str, Any],
+    output_dir_str: str,
+    mkdssp_exe: str | None,
+    freesasa_exe: str | None,
+    resume: bool,
+) -> dict[str, Any]:
+    torch_module = require_torch()
+    output_dir = Path(output_dir_str)
+    model_entity_id = str(fragment_row.get("model_entity_id") or "")
+    cache_path = output_dir / f"{model_entity_id}.pt"
+
+    if resume and cache_path.exists():
+        return {
+            "index": index,
+            "model_entity_id": model_entity_id,
+            "status": "skipped_existing",
+        }
+
+    try:
+        payload = build_structure_cache_payload(
+            fragment_row=fragment_row,
+            mkdssp_exe=mkdssp_exe,
+            freesasa_exe=freesasa_exe,
+        )
+        if payload is None:
+            return {
+                "index": index,
+                "model_entity_id": model_entity_id,
+                "status": "missing_modalities",
+            }
+
+        torch_module.save(payload, cache_path)
+        return {
+            "index": index,
+            "model_entity_id": model_entity_id,
+            "status": "built",
+        }
+    except Exception as exc:
+        return {
+            "index": index,
+            "model_entity_id": model_entity_id,
+            "status": "failure",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
 def build_structure_cache(args: argparse.Namespace) -> dict[str, Any]:
     require_torch()
     entry_filter = parse_entry_filter(args.entry_ids)
@@ -928,56 +980,148 @@ def build_structure_cache(args: argparse.Namespace) -> dict[str, Any]:
     skipped_missing_modalities = int(prior_counters["skipped_missing_modalities"])
     failures: list[dict[str, str]] = []
     started_at = perf_counter()
-    for index, fragment_row in enumerate(selected_rows[start_index:], start=start_index):
-        model_entity_id = str(fragment_row["model_entity_id"])
-        cache_path = output_dir / f"{model_entity_id}.pt"
-        if args.resume and cache_path.exists():
-            skipped_existing += 1
-        else:
-            try:
-                payload = build_structure_cache_payload(
-                    fragment_row=fragment_row,
-                    mkdssp_exe=args.mkdssp_exe,
-                    freesasa_exe=args.freesasa_exe,
-                )
-                if payload is None:
-                    skipped_missing_modalities += 1
-                else:
-                    torch.save(payload, cache_path)
-                    built += 1
-            except Exception as exc:
-                failures.append({"model_entity_id": model_entity_id, "error": str(exc)})
+    pending_rows = selected_rows[start_index:]
+    print_progress(f"[structure] workers={args.workers} pending={len(pending_rows)}")
 
-        processed = index + 1
+    def update_state_and_progress(processed: int, next_index: int, last_key: str) -> None:
         failure_count = int(prior_counters["failure_count"]) + len(failures)
-        if processed == 1 or processed % DEFAULT_PROGRESS_EVERY == 0 or processed == len(selected_rows):
-            write_resume_state(
-                state_path,
-                {
-                    "version": 1,
-                    "label": "structure",
-                    "selected_total": len(selected_rows),
-                    "next_index": processed,
-                    "built": built,
-                    "skipped_existing": skipped_existing,
-                    "skipped_missing_modalities": skipped_missing_modalities,
-                    "failure_count": failure_count,
-                    "last_key": model_entity_id,
-                },
+        write_resume_state(
+            state_path,
+            {
+                "version": 1,
+                "label": "structure",
+                "selected_total": len(selected_rows),
+                "next_index": next_index,
+                "built": built,
+                "skipped_existing": skipped_existing,
+                "skipped_missing_modalities": skipped_missing_modalities,
+                "failure_count": failure_count,
+                "last_key": last_key,
+            },
+        )
+        print_loop_progress(
+            "structure",
+            processed=processed,
+            total=len(selected_rows),
+            started_at=started_at,
+            detail_parts=[
+                f"built={built}",
+                f"skipped_existing={skipped_existing}",
+                f"missing_modalities={skipped_missing_modalities}",
+                f"failures={failure_count}",
+            ],
+            rate_processed=max(processed - start_index, 0),
+        )
+
+    if args.workers <= 1:
+        for index, fragment_row in enumerate(pending_rows, start=start_index):
+            model_entity_id = str(fragment_row["model_entity_id"])
+            result = process_structure_fragment_task(
+                index=index,
+                fragment_row=fragment_row,
+                output_dir_str=str(output_dir),
+                mkdssp_exe=args.mkdssp_exe,
+                freesasa_exe=args.freesasa_exe,
+                resume=args.resume,
             )
-            print_loop_progress(
-                "structure",
-                processed=processed,
-                total=len(selected_rows),
-                started_at=started_at,
-                detail_parts=[
-                    f"built={built}",
-                    f"skipped_existing={skipped_existing}",
-                    f"missing_modalities={skipped_missing_modalities}",
-                    f"failures={failure_count}",
-                ],
-                rate_processed=max(processed - start_index, 0),
-            )
+            status = result["status"]
+            if status == "built":
+                built += 1
+            elif status == "skipped_existing":
+                skipped_existing += 1
+            elif status == "missing_modalities":
+                skipped_missing_modalities += 1
+            else:
+                failures.append(
+                    {
+                        "model_entity_id": model_entity_id,
+                        "error": str(result.get("error") or "unknown worker failure"),
+                    }
+                )
+
+            processed = index + 1
+            if processed == 1 or processed % DEFAULT_PROGRESS_EVERY == 0 or processed == len(selected_rows):
+                update_state_and_progress(
+                    processed=processed,
+                    next_index=processed,
+                    last_key=model_entity_id,
+                )
+    else:
+        max_inflight = max(args.workers * DEFAULT_STRUCTURE_MAX_INFLIGHT_PER_WORKER, args.workers)
+        completed_count = 0
+        contiguous_next_index = start_index
+        completed_indices: set[int] = set()
+        row_queue = deque(enumerate(pending_rows, start=start_index))
+        in_flight: dict[Any, tuple[int, str]] = {}
+
+        def submit_tasks(executor: ProcessPoolExecutor) -> None:
+            while row_queue and len(in_flight) < max_inflight:
+                index, fragment_row = row_queue.popleft()
+                model_entity_id = str(fragment_row["model_entity_id"])
+                future = executor.submit(
+                    process_structure_fragment_task,
+                    index,
+                    fragment_row,
+                    str(output_dir),
+                    args.mkdssp_exe,
+                    args.freesasa_exe,
+                    args.resume,
+                )
+                in_flight[future] = (index, model_entity_id)
+
+        print_progress(
+            f"[structure] parallel mode enabled: workers={args.workers} max_inflight={max_inflight}"
+        )
+        with ProcessPoolExecutor(max_workers=args.workers) as executor:
+            submit_tasks(executor)
+            while in_flight:
+                done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+                for future in done:
+                    index, model_entity_id = in_flight.pop(future)
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        result = {
+                            "index": index,
+                            "model_entity_id": model_entity_id,
+                            "status": "failure",
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+
+                    status = str(result.get("status") or "failure")
+                    if status == "built":
+                        built += 1
+                    elif status == "skipped_existing":
+                        skipped_existing += 1
+                    elif status == "missing_modalities":
+                        skipped_missing_modalities += 1
+                    else:
+                        failures.append(
+                            {
+                                "model_entity_id": str(result.get("model_entity_id") or model_entity_id),
+                                "error": str(result.get("error") or "unknown worker failure"),
+                            }
+                        )
+
+                    completed_count += 1
+                    completed_indices.add(index)
+                    while contiguous_next_index in completed_indices:
+                        completed_indices.remove(contiguous_next_index)
+                        contiguous_next_index += 1
+
+                    processed = start_index + completed_count
+                    if processed == 1 or processed % DEFAULT_PROGRESS_EVERY == 0 or processed == len(selected_rows):
+                        last_key = (
+                            str(selected_rows[contiguous_next_index - 1]["model_entity_id"])
+                            if contiguous_next_index > 0
+                            else ""
+                        )
+                        update_state_and_progress(
+                            processed=processed,
+                            next_index=contiguous_next_index,
+                            last_key=last_key,
+                        )
+                submit_tasks(executor)
 
     summary = {
         "fragments_selected": len(selected_rows),
@@ -990,6 +1134,7 @@ def build_structure_cache(args: argparse.Namespace) -> dict[str, Any]:
         "mkdssp_exe": args.mkdssp_exe,
         "freesasa_exe": args.freesasa_exe,
         "resume_state_path": str(state_path.resolve()),
+        "workers": int(args.workers),
     }
     write_summary(output_dir / "_builder_summary.json", summary)
     write_resume_state(
