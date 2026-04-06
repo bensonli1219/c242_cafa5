@@ -43,6 +43,9 @@ if [[ "$USE_CONDA" == "1" ]]; then
   source "$CONDA_BASE/etc/profile.d/conda.sh"
   conda activate "$CONDA_ENV_NAME"
   PYTHON_BIN="$(command -v python)"
+  if [[ -n "${CONDA_PREFIX:-}" ]] && [[ -d "$CONDA_PREFIX/lib" ]]; then
+    export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+  fi
 fi
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
@@ -60,7 +63,9 @@ echo "USE_CONDA=$USE_CONDA"
 if [[ "$USE_CONDA" == "1" ]]; then
   echo "CONDA_BASE=$CONDA_BASE"
   echo "CONDA_ENV_NAME=$CONDA_ENV_NAME"
+  echo "CONDA_PREFIX=${CONDA_PREFIX:-}"
 fi
+echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}"
 
 "$PYTHON_BIN" -c "import sys; print('python_executable=' + sys.executable)"
 "$PYTHON_BIN" -c "import mdtraj; print('mdtraj ok')"
