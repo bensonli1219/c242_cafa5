@@ -100,6 +100,10 @@ class ExportSequenceArtifactsFromGraphCacheTests(unittest.TestCase):
                 "--skip-matched-splits",
                 "--progress-every",
                 "1",
+                "--workers",
+                "2",
+                "--progress-mode",
+                "log",
             ]
         )
 

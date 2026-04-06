@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -32,6 +34,11 @@ try:  # pragma: no cover - optional outside the graph / notebook env
     import torch
 except ImportError:  # pragma: no cover
     torch = None
+
+try:  # pragma: no cover - optional in lighter notebook envs
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover
+    tqdm = None
 
 
 DEFAULT_ASPECTS = ("BPO", "CCO", "MFO")
@@ -92,11 +99,38 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=10,
         help="Print Parquet scan progress every N batches (default: 10).",
     )
+    parser.add_argument(
+        "--workers",
+        type=positive_int,
+        default=1,
+        help="Number of worker threads for loading ESM cache .pt files (default: 1).",
+    )
+    parser.add_argument(
+        "--progress-mode",
+        choices=("auto", "log", "tqdm", "none"),
+        default="auto",
+        help=(
+            "Progress display mode. 'auto' uses tqdm for interactive terminals and "
+            "periodic log lines elsewhere."
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def log(message: str) -> None:
     print(message, flush=True)
+
+
+def should_use_tqdm(progress_mode: str) -> bool:
+    if progress_mode == "none":
+        return False
+    if progress_mode == "log":
+        return False
+    if progress_mode == "tqdm":
+        if tqdm is None:
+            raise RuntimeError("progress-mode=tqdm requires the 'tqdm' package to be installed.")
+        return True
+    return tqdm is not None and sys.stderr.isatty()
 
 
 def ensure_parent(path: Path) -> None:
@@ -232,8 +266,7 @@ def count_pt_files(cache_dir: Path, progress_every: int = 5_000) -> int:
     return count
 
 
-def modality_cache_state(cache_dir: Path, expected_count: int, progress_every: int = 5_000) -> tuple[str, dict[str, int]]:
-    pt_count = count_pt_files(cache_dir, progress_every=progress_every)
+def modality_cache_state_from_count(pt_count: int, expected_count: int) -> tuple[str, dict[str, int]]:
     if expected_count <= 0:
         return ("complete" if pt_count > 0 else "missing"), {"pt_files": pt_count, "expected": expected_count}
     if pt_count == 0:
@@ -241,6 +274,11 @@ def modality_cache_state(cache_dir: Path, expected_count: int, progress_every: i
     if pt_count >= expected_count:
         return "complete", {"pt_files": pt_count, "expected": expected_count}
     return "partial", {"pt_files": pt_count, "expected": expected_count}
+
+
+def modality_cache_state(cache_dir: Path, expected_count: int, progress_every: int = 5_000) -> tuple[str, dict[str, int]]:
+    pt_count = count_pt_files(cache_dir, progress_every=progress_every)
+    return modality_cache_state_from_count(pt_count=pt_count, expected_count=expected_count)
 
 
 def require_torch():
@@ -267,6 +305,26 @@ def extract_embedding(payload: dict[str, Any], fallback_entry_id: str) -> tuple[
             f"Expected a 1D protein embedding for {entry_id}; got shape {tuple(array.shape)}"
         )
     return entry_id, array
+
+
+def load_embedding_from_cache_path(cache_path: Path) -> tuple[Path, str, np.ndarray | None]:
+    torch_module = require_torch()
+    payload = torch_module.load(cache_path, map_location="cpu", weights_only=False)
+    entry_id, embedding = extract_embedding(payload, fallback_entry_id=cache_path.stem)
+    return cache_path, entry_id, embedding
+
+
+def iter_loaded_embeddings(
+    cache_paths: list[Path],
+    workers: int = 1,
+) -> Iterable[tuple[Path, str, np.ndarray | None]]:
+    if workers <= 1:
+        for cache_path in cache_paths:
+            yield load_embedding_from_cache_path(cache_path)
+        return
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        yield from executor.map(load_embedding_from_cache_path, cache_paths)
 
 
 def mirror_graph_splits(
@@ -322,48 +380,15 @@ def mirror_graph_splits(
     }
 
 
-def inspect_esm_cache(
-    cache_paths: list[Path],
-    progress_every: int = 500,
-) -> tuple[list[tuple[str, Path]], int]:
-    torch_module = require_torch()
-    valid_entries: list[tuple[str, Path]] = []
-    embedding_dim: int | None = None
-    log(f"[progress] protein_esm2_640: inspecting {len(cache_paths):,} cache files")
-    for index, cache_path in enumerate(cache_paths, start=1):
-        payload = torch_module.load(cache_path, map_location="cpu", weights_only=False)
-        entry_id, embedding = extract_embedding(payload, fallback_entry_id=cache_path.stem)
-        if embedding is None:
-            if index == 1 or index % progress_every == 0:
-                log(
-                    f"[progress] protein_esm2_640: scanned {index:,}/{len(cache_paths):,}; "
-                    f"valid embeddings={len(valid_entries):,}"
-                )
-            continue
-        if embedding_dim is None:
-            embedding_dim = int(embedding.shape[0])
-        elif int(embedding.shape[0]) != embedding_dim:
-            raise ValueError(
-                f"Inconsistent embedding dim for {cache_path}: "
-                f"expected {embedding_dim}, got {int(embedding.shape[0])}"
-            )
-        valid_entries.append((entry_id, cache_path))
-        if index == 1 or index % progress_every == 0 or index == len(cache_paths):
-            log(
-                f"[progress] protein_esm2_640: scanned {index:,}/{len(cache_paths):,}; "
-                f"valid embeddings={len(valid_entries):,}"
-            )
-    if embedding_dim is None or not valid_entries:
-        raise RuntimeError(f"No protein_embedding payloads were found in {cache_paths[0].parent if cache_paths else 'cache dir'}")
-    return valid_entries, embedding_dim
-
-
 def export_protein_esm_matrix(
+    cache_paths: list[Path],
     esm_cache_dir: Path,
     output_dir: Path,
     expected_ok_entries: int,
     overwrite: bool = False,
     progress_every: int = 500,
+    workers: int = 1,
+    progress_mode: str = "auto",
 ) -> dict[str, Any]:
     x_path = output_dir / "X.npy"
     ids_path = output_dir / "entry_ids.txt"
@@ -385,54 +410,83 @@ def export_protein_esm_matrix(
             "Rerun with --overwrite after checking the partial files."
         )
 
-    cache_paths = sorted(
-        path for path in esm_cache_dir.iterdir()
-        if path.is_file() and path.suffix == ".pt"
-    )
     if not cache_paths:
         raise FileNotFoundError(f"No .pt ESM cache files were found under {esm_cache_dir}")
-
-    valid_entries, embedding_dim = inspect_esm_cache(
-        cache_paths,
-        progress_every=progress_every,
-    )
-    if expected_ok_entries > 0 and len(valid_entries) < expected_ok_entries:
-        raise RuntimeError(
-            f"Expected at least {expected_ok_entries:,} protein embeddings, "
-            f"but found only {len(valid_entries):,} valid cache payloads in {esm_cache_dir}"
-        )
 
     ensure_parent(x_path)
     tmp_x_path = x_path.with_name(f"{x_path.name}.tmp")
     tmp_ids_path = ids_path.with_name(f"{ids_path.name}.tmp")
     tmp_meta_path = meta_path.with_name(f"{meta_path.name}.tmp")
-
-    memmap = np.lib.format.open_memmap(
-        tmp_x_path,
-        mode="w+",
-        dtype=np.float32,
-        shape=(len(valid_entries), embedding_dim),
-    )
-    torch_module = require_torch()
-    entry_ids: list[str] = []
+    use_tqdm = should_use_tqdm(progress_mode)
+    total_files = len(cache_paths)
     log(
-        f"[progress] protein_esm2_640: writing matrix with shape "
-        f"({len(valid_entries):,}, {embedding_dim}) to {x_path}"
+        f"[progress] protein_esm2_640: loading {total_files:,} cache files "
+        f"(workers={workers}, progress_mode={'tqdm' if use_tqdm else progress_mode})"
     )
-    for row_index, (entry_id, cache_path) in enumerate(valid_entries, start=1):
-        payload = torch_module.load(cache_path, map_location="cpu", weights_only=False)
-        _, embedding = extract_embedding(payload, fallback_entry_id=cache_path.stem)
-        if embedding is None:
-            raise RuntimeError(f"Embedding disappeared while writing rows: {cache_path}")
-        memmap[row_index - 1] = embedding
-        entry_ids.append(entry_id)
-        if row_index == 1 or row_index % progress_every == 0 or row_index == len(valid_entries):
-            log(
-                f"[progress] protein_esm2_640: wrote {row_index:,}/{len(valid_entries):,} rows"
-            )
-    memmap.flush()
-    del memmap
+    iterator: Iterable[tuple[Path, str, np.ndarray | None]] = iter_loaded_embeddings(
+        cache_paths,
+        workers=workers,
+    )
+    if use_tqdm:
+        iterator = tqdm(
+            iterator,
+            total=total_files,
+            desc="protein_esm2_640",
+            unit="file",
+            mininterval=1.0,
+        )
 
+    entry_ids: list[str] = []
+    matrix: np.ndarray | None = None
+    embedding_dim: int | None = None
+    valid_count = 0
+    for file_index, (cache_path, entry_id, embedding) in enumerate(iterator, start=1):
+        if embedding is None:
+            if not use_tqdm and (file_index == 1 or file_index % progress_every == 0 or file_index == total_files):
+                log(
+                    f"[progress] protein_esm2_640: scanned {file_index:,}/{total_files:,}; "
+                    f"valid embeddings={valid_count:,}"
+                )
+            continue
+        current_dim = int(embedding.shape[0])
+        if embedding_dim is None:
+            embedding_dim = current_dim
+            matrix = np.empty((total_files, embedding_dim), dtype=np.float32)
+            log(
+                f"[progress] protein_esm2_640: allocated in-memory matrix with capacity "
+                f"({total_files:,}, {embedding_dim})"
+            )
+        elif current_dim != embedding_dim:
+            raise ValueError(
+                f"Inconsistent embedding dim for {cache_path}: "
+                f"expected {embedding_dim}, got {current_dim}"
+            )
+        assert matrix is not None
+        matrix[valid_count] = embedding
+        entry_ids.append(entry_id)
+        valid_count += 1
+        if not use_tqdm and (file_index == 1 or file_index % progress_every == 0 or file_index == total_files):
+            log(
+                f"[progress] protein_esm2_640: scanned {file_index:,}/{total_files:,}; "
+                f"valid embeddings={valid_count:,}"
+            )
+
+    if matrix is None or embedding_dim is None or valid_count == 0:
+        raise RuntimeError(f"No protein_embedding payloads were found in {esm_cache_dir}")
+    if expected_ok_entries > 0 and valid_count < expected_ok_entries:
+        raise RuntimeError(
+            f"Expected at least {expected_ok_entries:,} protein embeddings, "
+            f"but found only {valid_count:,} valid cache payloads in {esm_cache_dir}"
+        )
+    if expected_ok_entries > 0 and valid_count > expected_ok_entries:
+        log(
+            f"[warn] protein_esm2_640: found {valid_count:,} valid embeddings for "
+            f"{expected_ok_entries:,} expected ok entries; exporting all valid rows."
+        )
+
+    trimmed_matrix = matrix[:valid_count]
+    with tmp_x_path.open("wb") as handle:
+        np.save(handle, trimmed_matrix)
     atomic_write_lines(tmp_ids_path, entry_ids)
     atomic_write_json(
         tmp_meta_path,
@@ -506,10 +560,15 @@ def main(argv: list[str] | None = None) -> int:
             batch_size=args.parquet_batch_size,
             progress_every_batches=args.parquet_progress_every_batches,
         )
-        esm_state, esm_meta = modality_cache_state(
-            esm_cache_dir,
+        log(f"[progress] graph_esm_cache: listing cache files under {esm_cache_dir}")
+        cache_paths = sorted(
+            path for path in esm_cache_dir.iterdir()
+            if path.is_file() and path.suffix == ".pt"
+        ) if esm_cache_dir.exists() else []
+        log(f"[progress] graph_esm_cache: found {len(cache_paths):,} .pt files")
+        esm_state, esm_meta = modality_cache_state_from_count(
+            pt_count=len(cache_paths),
             expected_count=expected_ok_entries,
-            progress_every=max(args.progress_every, 1),
         )
         log(
             f"[graph_esm_cache] state = {esm_state} "
@@ -520,11 +579,14 @@ def main(argv: list[str] | None = None) -> int:
                 f"Graph ESM cache is {esm_state}; refusing to export protein-level embeddings."
             )
         summary["protein_esm2_640_from_graph_cache"] = export_protein_esm_matrix(
+            cache_paths=cache_paths,
             esm_cache_dir=esm_cache_dir,
             output_dir=protein_esm_dir,
             expected_ok_entries=expected_ok_entries,
             overwrite=args.overwrite,
             progress_every=args.progress_every,
+            workers=args.workers,
+            progress_mode=args.progress_mode,
         )
 
     print(json.dumps(summary, indent=2))
