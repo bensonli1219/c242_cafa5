@@ -1,0 +1,73 @@
+#!/bin/bash
+#SBATCH --job-name=build_structure_cache
+#SBATCH --account=ic_chem242
+#SBATCH --partition=savio2_htc
+#SBATCH --qos=savio_normal
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --time=24:00:00
+#SBATCH --output=/global/scratch/users/%u/logs/build_structure_cache_%j.out
+#SBATCH --error=/global/scratch/users/%u/logs/build_structure_cache_%j.err
+
+set -euo pipefail
+
+LOG_DIR="/global/scratch/users/$USER/logs"
+REPO_ROOT="${REPO_ROOT:-/global/home/users/$USER/c242_cafa5}"
+RUN_ROOT="${RUN_ROOT:-/global/scratch/users/$USER/cafa5_outputs}"
+PYTHON_BIN="${PYTHON_BIN:-/global/home/users/$USER/venvs/cafa5-notebook/bin/python}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-cafa5}"
+CONDA_BASE="${CONDA_BASE:-}"
+USE_CONDA="${USE_CONDA:-1}"
+
+mkdir -p "$LOG_DIR"
+
+if [[ ! -f "$REPO_ROOT/build_structure_cache.py" ]]; then
+  echo "Missing script: $REPO_ROOT/build_structure_cache.py" >&2
+  echo "Set REPO_ROOT to your checked-out repo path before sbatch." >&2
+  exit 1
+fi
+
+if [[ "$USE_CONDA" == "1" ]]; then
+  if [[ -z "$CONDA_BASE" ]] && command -v conda >/dev/null 2>&1; then
+    CONDA_BASE="$(conda info --base)"
+  fi
+  if [[ -z "$CONDA_BASE" ]] && [[ -f /global/software/rocky-8.x86_64/manual/modules/langs/anaconda3/2024.02-1/etc/profile.d/conda.sh ]]; then
+    CONDA_BASE="/global/software/rocky-8.x86_64/manual/modules/langs/anaconda3/2024.02-1"
+  fi
+  if [[ -z "$CONDA_BASE" ]] || [[ ! -f "$CONDA_BASE/etc/profile.d/conda.sh" ]]; then
+    echo "Unable to locate conda.sh. Set CONDA_BASE or disable USE_CONDA." >&2
+    exit 1
+  fi
+  # shellcheck disable=SC1090
+  source "$CONDA_BASE/etc/profile.d/conda.sh"
+  conda activate "$CONDA_ENV_NAME"
+  PYTHON_BIN="$(command -v python)"
+fi
+
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  echo "Python not found or not executable: $PYTHON_BIN" >&2
+  exit 1
+fi
+
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
+export PYTHONUNBUFFERED=1
+
+echo "PYTHON_BIN=$PYTHON_BIN"
+echo "REPO_ROOT=$REPO_ROOT"
+echo "RUN_ROOT=$RUN_ROOT"
+echo "USE_CONDA=$USE_CONDA"
+if [[ "$USE_CONDA" == "1" ]]; then
+  echo "CONDA_BASE=$CONDA_BASE"
+  echo "CONDA_ENV_NAME=$CONDA_ENV_NAME"
+fi
+
+"$PYTHON_BIN" -c "import sys; print('python_executable=' + sys.executable)"
+"$PYTHON_BIN" -c "import mdtraj; print('mdtraj ok')"
+command -v mkdssp && echo "mkdssp found" || echo "mkdssp not found; builder will fall back if mdtraj works"
+command -v freesasa && echo "freesasa found" || echo "freesasa not found; builder will fall back if mdtraj works"
+
+"$PYTHON_BIN" -u "$REPO_ROOT/build_structure_cache.py" \
+    --fragment-manifest "$RUN_ROOT/manifests/alphafold_fragments.parquet" \
+    --output-dir "$RUN_ROOT/graph_cache/modality_cache/structure" \
+    --resume

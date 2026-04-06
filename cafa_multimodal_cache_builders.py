@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import pyarrow.parquet as pq
@@ -38,6 +39,7 @@ except ImportError:  # pragma: no cover
 DEFAULT_ESM2_MODEL = "facebook/esm2_t30_150M_UR50D"
 DEFAULT_MAX_RESIDUES_PER_CHUNK = 1000
 DEFAULT_CHUNK_OVERLAP = 128
+DEFAULT_PROGRESS_EVERY = 100
 
 SS3_ORDER = ("helix", "sheet", "coil")
 HELIX_CODES = {"H", "G", "I"}
@@ -233,6 +235,133 @@ def write_summary(path: Path, payload: dict[str, Any]) -> None:
         json.dump(payload, handle, indent=2)
 
 
+def print_progress(message: str) -> None:
+    print(message, flush=True)
+
+
+def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    pipeline.ensure_parent(path)
+    tmp_path = path.with_suffix(f"{path.suffix}.tmp")
+    with tmp_path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    tmp_path.replace(path)
+
+
+def load_json_if_exists(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def render_progress_bar(processed: int, total: int, width: int = 24) -> str:
+    if total <= 0:
+        return "[------------------------] 0/0 (100.0%)"
+    ratio = min(max(processed / total, 0.0), 1.0)
+    filled = min(width, int(ratio * width))
+    return f"[{'#' * filled}{'-' * (width - filled)}] {processed}/{total} ({ratio * 100:5.1f}%)"
+
+
+def print_loop_progress(
+    label: str,
+    processed: int,
+    total: int,
+    started_at: float,
+    detail_parts: list[str],
+    rate_processed: int | None = None,
+) -> None:
+    elapsed = max(perf_counter() - started_at, 1e-6)
+    processed_for_rate = processed if rate_processed is None else rate_processed
+    rate = processed_for_rate / elapsed if processed_for_rate > 0 else 0.0
+    bar = render_progress_bar(processed, total)
+    detail_text = " ".join(detail_parts)
+    print_progress(f"[{label}] {bar} rate={rate:.2f}/s elapsed={elapsed:.1f}s {detail_text}".strip())
+
+
+def default_resume_state_path(output_dir: Path) -> Path:
+    return output_dir / "_resume_state.json"
+
+
+def write_resume_state(path: Path, payload: dict[str, Any]) -> None:
+    write_json_atomic(path, payload)
+
+
+def infer_contiguous_resume_index(
+    rows: list[dict[str, Any]],
+    output_dir: Path,
+    key: str,
+    label: str,
+) -> int:
+    if not rows:
+        return 0
+    prefix_count = 0
+    started_at = perf_counter()
+    checkpoint_every = max(1000, DEFAULT_PROGRESS_EVERY * 10)
+    for index, row in enumerate(rows):
+        cache_key = str(row.get(key) or "").strip()
+        if not cache_key or not (output_dir / f"{cache_key}.pt").exists():
+            break
+        prefix_count = index + 1
+        if prefix_count == 1 or prefix_count % checkpoint_every == 0:
+            print_progress(
+                f"[{label}] resume scan {render_progress_bar(prefix_count, len(rows))} "
+                f"elapsed={perf_counter() - started_at:.1f}s"
+            )
+    print_progress(
+        f"[{label}] resume scan complete: contiguous_completed_prefix={prefix_count}/{len(rows)} "
+        f"elapsed={perf_counter() - started_at:.1f}s"
+    )
+    return prefix_count
+
+
+def resolve_resume_start(
+    rows: list[dict[str, Any]],
+    output_dir: Path,
+    key: str,
+    label: str,
+    resume_enabled: bool,
+) -> tuple[int, dict[str, int], Path]:
+    state_path = default_resume_state_path(output_dir)
+    if not resume_enabled:
+        counters = {"built": 0, "skipped_existing": 0, "skipped_missing_modalities": 0, "failure_count": 0}
+        return 0, counters, state_path
+
+    state = load_json_if_exists(state_path)
+    if state is not None:
+        next_index = int(state.get("next_index", 0) or 0)
+        selected_total = int(state.get("selected_total", -1) or -1)
+        if 0 <= next_index <= len(rows) and selected_total == len(rows):
+            valid = True
+            if next_index > 0:
+                previous_key = str(rows[next_index - 1].get(key) or "").strip()
+                valid = bool(previous_key) and (output_dir / f"{previous_key}.pt").exists()
+            if valid:
+                counters = {
+                    "built": int(state.get("built", 0) or 0),
+                    "skipped_existing": int(state.get("skipped_existing", 0) or 0),
+                    "skipped_missing_modalities": int(state.get("skipped_missing_modalities", 0) or 0),
+                    "failure_count": int(state.get("failure_count", 0) or 0),
+                }
+                print_progress(
+                    f"[{label}] resuming from state file {state_path} at index={next_index}/{len(rows)}"
+                )
+                return next_index, counters, state_path
+        print_progress(f"[{label}] ignoring stale resume state: {state_path}")
+
+    prefix_count = infer_contiguous_resume_index(rows, output_dir, key=key, label=label)
+    counters = {
+        "built": 0,
+        "skipped_existing": prefix_count,
+        "skipped_missing_modalities": 0,
+        "failure_count": 0,
+    }
+    return prefix_count, counters, state_path
+
+
 def load_transformers():
     try:  # pragma: no cover - optional dependency in the local env
         from transformers import AutoModel, AutoTokenizer
@@ -304,11 +433,43 @@ def build_esm2_cache(args: argparse.Namespace) -> dict[str, Any]:
 
     output_dir = args.output_dir
     pipeline.ensure_parent(output_dir / "placeholder")
+    print_progress(
+        f"[esm2] selected={len(selected_rows)} output_dir={output_dir} resume={args.resume}"
+    )
+    start_index, prior_counters, state_path = resolve_resume_start(
+        selected_rows,
+        output_dir,
+        key="entry_id",
+        label="esm2",
+        resume_enabled=args.resume,
+    )
+    print_progress(
+        f"[esm2] starting_index={start_index} prior_built={prior_counters['built']} "
+        f"prior_skipped_existing={prior_counters['skipped_existing']}"
+    )
+    if selected_rows and start_index >= len(selected_rows):
+        summary = {
+            "entries_selected": len(selected_rows),
+            "entries_built": int(prior_counters["built"]),
+            "skipped_existing": int(prior_counters["skipped_existing"]),
+            "failures": [],
+            "failure_count": int(prior_counters["failure_count"]),
+            "model_name": args.model_name,
+            "device": "not_loaded_all_existing",
+            "output_dir": str(output_dir.resolve()),
+            "resume_state_path": str(state_path.resolve()),
+        }
+        write_summary(output_dir / "_builder_summary.json", summary)
+        print_progress("[esm2] all selected cache files already exist; nothing to do")
+        return summary
+
     device = resolve_device(args.device)
+    print_progress(f"[esm2] loading tokenizer/model on device={device}")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     model = AutoModel.from_pretrained(args.model_name)
     model.eval()
     model.to(device)
+    print_progress(f"[esm2] model loaded: {args.model_name}")
 
     if int(getattr(model.config, "hidden_size", 0)) != graphs.ESM2_DIM:
         raise ValueError(
@@ -316,51 +477,97 @@ def build_esm2_cache(args: argparse.Namespace) -> dict[str, Any]:
             f"does not match expected ESM2 width {graphs.ESM2_DIM}"
         )
 
-    built = 0
-    skipped_existing = 0
+    built = int(prior_counters["built"])
+    skipped_existing = int(prior_counters["skipped_existing"])
     failures: list[dict[str, str]] = []
-    for row in selected_rows:
+    started_at = perf_counter()
+    for index, row in enumerate(selected_rows[start_index:], start=start_index):
         entry_id = str(row["entry_id"])
         cache_path = output_dir / f"{entry_id}.pt"
         if args.resume and cache_path.exists():
             skipped_existing += 1
-            continue
+        else:
+            try:
+                residue_embedding, protein_embedding = _encode_sequence_chunks(
+                    sequence=str(row["sequence"]),
+                    tokenizer=tokenizer,
+                    model=model,
+                    device=device,
+                    max_residues_per_chunk=int(args.max_residues_per_chunk),
+                    chunk_overlap=int(args.chunk_overlap),
+                )
+                payload = {
+                    "entry_id": entry_id,
+                    "model_name": args.model_name,
+                    "cafa_residue_index": torch_module.arange(
+                        1,
+                        residue_embedding.shape[0] + 1,
+                        dtype=torch_module.long,
+                    ),
+                    "residue_embedding": residue_embedding,
+                    "protein_embedding": protein_embedding,
+                }
+                torch_module.save(payload, cache_path)
+                built += 1
+            except Exception as exc:
+                failures.append({"entry_id": entry_id, "error": str(exc)})
 
-        try:
-            residue_embedding, protein_embedding = _encode_sequence_chunks(
-                sequence=str(row["sequence"]),
-                tokenizer=tokenizer,
-                model=model,
-                device=device,
-                max_residues_per_chunk=int(args.max_residues_per_chunk),
-                chunk_overlap=int(args.chunk_overlap),
+        processed = index + 1
+        failure_count = int(prior_counters["failure_count"]) + len(failures)
+        if processed == 1 or processed % DEFAULT_PROGRESS_EVERY == 0 or processed == len(selected_rows):
+            write_resume_state(
+                state_path,
+                {
+                    "version": 1,
+                    "label": "esm2",
+                    "selected_total": len(selected_rows),
+                    "next_index": processed,
+                    "built": built,
+                    "skipped_existing": skipped_existing,
+                    "skipped_missing_modalities": 0,
+                    "failure_count": failure_count,
+                    "last_key": entry_id,
+                },
             )
-            payload = {
-                "entry_id": entry_id,
-                "model_name": args.model_name,
-                "cafa_residue_index": torch_module.arange(
-                    1,
-                    residue_embedding.shape[0] + 1,
-                    dtype=torch_module.long,
-                ),
-                "residue_embedding": residue_embedding,
-                "protein_embedding": protein_embedding,
-            }
-            torch_module.save(payload, cache_path)
-            built += 1
-        except Exception as exc:
-            failures.append({"entry_id": entry_id, "error": str(exc)})
+            print_loop_progress(
+                "esm2",
+                processed=processed,
+                total=len(selected_rows),
+                started_at=started_at,
+                detail_parts=[
+                    f"built={built}",
+                    f"skipped_existing={skipped_existing}",
+                    f"failures={failure_count}",
+                ],
+                rate_processed=max(processed - start_index, 0),
+            )
 
     summary = {
         "entries_selected": len(selected_rows),
         "entries_built": built,
         "skipped_existing": skipped_existing,
         "failures": failures,
+        "failure_count": int(prior_counters["failure_count"]) + len(failures),
         "model_name": args.model_name,
         "device": str(device),
         "output_dir": str(output_dir.resolve()),
+        "resume_state_path": str(state_path.resolve()),
     }
     write_summary(output_dir / "_builder_summary.json", summary)
+    write_resume_state(
+        state_path,
+        {
+            "version": 1,
+            "label": "esm2",
+            "selected_total": len(selected_rows),
+            "next_index": len(selected_rows),
+            "built": built,
+            "skipped_existing": skipped_existing,
+            "skipped_missing_modalities": 0,
+            "failure_count": summary["failure_count"],
+            "last_key": str(selected_rows[-1]["entry_id"]) if selected_rows else "",
+        },
+    )
     return summary
 
 
@@ -684,31 +891,93 @@ def build_structure_cache(args: argparse.Namespace) -> dict[str, Any]:
 
     output_dir = args.output_dir
     pipeline.ensure_parent(output_dir / "placeholder")
+    print_progress(
+        f"[structure] selected={len(selected_rows)} output_dir={output_dir} resume={args.resume}"
+    )
+    start_index, prior_counters, state_path = resolve_resume_start(
+        selected_rows,
+        output_dir,
+        key="model_entity_id",
+        label="structure",
+        resume_enabled=args.resume,
+    )
+    print_progress(
+        f"[structure] starting_index={start_index} prior_built={prior_counters['built']} "
+        f"prior_skipped_existing={prior_counters['skipped_existing']} "
+        f"prior_missing_modalities={prior_counters['skipped_missing_modalities']}"
+    )
+    if selected_rows and start_index >= len(selected_rows):
+        summary = {
+            "fragments_selected": len(selected_rows),
+            "fragments_built": int(prior_counters["built"]),
+            "skipped_existing": int(prior_counters["skipped_existing"]),
+            "skipped_missing_modalities": int(prior_counters["skipped_missing_modalities"]),
+            "failures": [],
+            "failure_count": int(prior_counters["failure_count"]),
+            "output_dir": str(output_dir.resolve()),
+            "mkdssp_exe": args.mkdssp_exe,
+            "freesasa_exe": args.freesasa_exe,
+            "resume_state_path": str(state_path.resolve()),
+        }
+        write_summary(output_dir / "_builder_summary.json", summary)
+        print_progress("[structure] all selected cache files already exist; nothing to do")
+        return summary
 
-    built = 0
-    skipped_existing = 0
-    skipped_missing_modalities = 0
+    built = int(prior_counters["built"])
+    skipped_existing = int(prior_counters["skipped_existing"])
+    skipped_missing_modalities = int(prior_counters["skipped_missing_modalities"])
     failures: list[dict[str, str]] = []
-    for fragment_row in selected_rows:
+    started_at = perf_counter()
+    for index, fragment_row in enumerate(selected_rows[start_index:], start=start_index):
         model_entity_id = str(fragment_row["model_entity_id"])
         cache_path = output_dir / f"{model_entity_id}.pt"
         if args.resume and cache_path.exists():
             skipped_existing += 1
-            continue
+        else:
+            try:
+                payload = build_structure_cache_payload(
+                    fragment_row=fragment_row,
+                    mkdssp_exe=args.mkdssp_exe,
+                    freesasa_exe=args.freesasa_exe,
+                )
+                if payload is None:
+                    skipped_missing_modalities += 1
+                else:
+                    torch.save(payload, cache_path)
+                    built += 1
+            except Exception as exc:
+                failures.append({"model_entity_id": model_entity_id, "error": str(exc)})
 
-        try:
-            payload = build_structure_cache_payload(
-                fragment_row=fragment_row,
-                mkdssp_exe=args.mkdssp_exe,
-                freesasa_exe=args.freesasa_exe,
+        processed = index + 1
+        failure_count = int(prior_counters["failure_count"]) + len(failures)
+        if processed == 1 or processed % DEFAULT_PROGRESS_EVERY == 0 or processed == len(selected_rows):
+            write_resume_state(
+                state_path,
+                {
+                    "version": 1,
+                    "label": "structure",
+                    "selected_total": len(selected_rows),
+                    "next_index": processed,
+                    "built": built,
+                    "skipped_existing": skipped_existing,
+                    "skipped_missing_modalities": skipped_missing_modalities,
+                    "failure_count": failure_count,
+                    "last_key": model_entity_id,
+                },
             )
-            if payload is None:
-                skipped_missing_modalities += 1
-                continue
-            torch.save(payload, cache_path)
-            built += 1
-        except Exception as exc:
-            failures.append({"model_entity_id": model_entity_id, "error": str(exc)})
+            print_loop_progress(
+                "structure",
+                processed=processed,
+                total=len(selected_rows),
+                started_at=started_at,
+                detail_parts=[
+                    f"built={built}",
+                    f"skipped_existing={skipped_existing}",
+                    f"missing_modalities={skipped_missing_modalities}",
+                    f"failures={failure_count}",
+                ],
+                rate_processed=max(processed - start_index, 0),
+            )
 
     summary = {
         "fragments_selected": len(selected_rows),
@@ -716,11 +985,27 @@ def build_structure_cache(args: argparse.Namespace) -> dict[str, Any]:
         "skipped_existing": skipped_existing,
         "skipped_missing_modalities": skipped_missing_modalities,
         "failures": failures,
+        "failure_count": int(prior_counters["failure_count"]) + len(failures),
         "output_dir": str(output_dir.resolve()),
         "mkdssp_exe": args.mkdssp_exe,
         "freesasa_exe": args.freesasa_exe,
+        "resume_state_path": str(state_path.resolve()),
     }
     write_summary(output_dir / "_builder_summary.json", summary)
+    write_resume_state(
+        state_path,
+        {
+            "version": 1,
+            "label": "structure",
+            "selected_total": len(selected_rows),
+            "next_index": len(selected_rows),
+            "built": built,
+            "skipped_existing": skipped_existing,
+            "skipped_missing_modalities": skipped_missing_modalities,
+            "failure_count": summary["failure_count"],
+            "last_key": str(selected_rows[-1]["model_entity_id"]) if selected_rows else "",
+        },
+    )
     return summary
 
 
