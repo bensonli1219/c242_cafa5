@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=train_graph_full
 #SBATCH --account=ic_chem242
-#SBATCH --partition=savio_1080ti
+#SBATCH --partition=savio2_1080ti
 #SBATCH --qos=savio_normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -74,7 +74,7 @@ exec > >(tee -a "$RUN_DIR/driver.log") 2>&1
 echo "started_at=$(date -Iseconds)"
 echo "job_id=${SLURM_JOB_ID:-local}"
 echo "host=$(hostname)"
-echo "partition=${SLURM_JOB_PARTITION:-savio_1080ti}"
+echo "partition=${SLURM_JOB_PARTITION:-savio2_1080ti}"
 echo "cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
