@@ -3,12 +3,13 @@
 #SBATCH --account=ic_chem242
 #SBATCH --partition=savio2_1080ti
 #SBATCH --qos=savio_normal
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=2
 #SBATCH --gres=gpu:4
 #SBATCH --mem=64G
-#SBATCH --time=24:00:00
+# savio_normal is documented with a 72-hour cap; use an allowed condo QoS if five days is rejected.
+#SBATCH --time=5-00:00:00
 #SBATCH --output=/global/scratch/users/%u/logs/train_graph_full_%j.out
 #SBATCH --error=/global/scratch/users/%u/logs/train_graph_full_%j.err
 
@@ -24,7 +25,7 @@ PYTHON_BIN="${PYTHON_BIN:-/global/home/users/$USER/venvs/cafa5-notebook/bin/pyth
 FRAMEWORK="${FRAMEWORK:-pyg}"
 ASPECTS="${ASPECTS:-BPO CCO MFO}"
 MIN_TERM_FREQUENCY="${MIN_TERM_FREQUENCY:-20}"
-EPOCHS="${EPOCHS:-10}"
+EPOCHS="${EPOCHS:-5}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 NUM_WORKERS="${NUM_WORKERS:-2}"
 HIDDEN_DIM="${HIDDEN_DIM:-128}"
@@ -41,8 +42,13 @@ USE_ESM2="${USE_ESM2:-1}"
 USE_DSSP="${USE_DSSP:-1}"
 USE_SASA="${USE_SASA:-1}"
 CONTINUE_ON_FAILURE="${CONTINUE_ON_FAILURE:-0}"
+USE_SRUN="${USE_SRUN:-1}"
+SRUN_CPUS_PER_TASK="${SRUN_CPUS_PER_TASK:-${SLURM_CPUS_PER_TASK:-2}}"
+REQUESTED_WALLTIME="${REQUESTED_WALLTIME:-5-00:00:00}"
+REQUESTED_GPU_TOTAL="${REQUESTED_GPU_TOTAL:-8}"
+REQUESTED_GPU_PER_NODE="${REQUESTED_GPU_PER_NODE:-4}"
 GPU_IDS="${GPU_IDS:-0 1 2 3}"
-MAX_PARALLEL="${MAX_PARALLEL:-4}"
+MAX_PARALLEL="${MAX_PARALLEL:-8}"
 
 EVAL_ROOT="${EVAL_ROOT:-$HOME/cafa5}"
 IA_FILE="${IA_FILE:-$EVAL_ROOT/IA.txt}"
@@ -75,12 +81,49 @@ echo "started_at=$(date -Iseconds)"
 echo "job_id=${SLURM_JOB_ID:-local}"
 echo "host=$(hostname)"
 echo "partition=${SLURM_JOB_PARTITION:-savio2_1080ti}"
+echo "node_list=${SLURM_JOB_NODELIST:-local}"
+echo "job_num_nodes=${SLURM_JOB_NUM_NODES:-1}"
+echo "ntasks=${SLURM_NTASKS:-1}"
+echo "cpus_per_task=${SLURM_CPUS_PER_TASK:-$SRUN_CPUS_PER_TASK}"
+echo "requested_walltime=$REQUESTED_WALLTIME"
+echo "requested_gpu_total=$REQUESTED_GPU_TOTAL"
+echo "requested_gpu_per_node=$REQUESTED_GPU_PER_NODE"
+echo "slurm_gpus=${SLURM_GPUS:-}"
+echo "slurm_gpus_on_node=${SLURM_GPUS_ON_NODE:-}"
 echo "cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-}"
+
+if [[ -n "${SLURM_JOB_NODELIST:-}" ]] && command -v scontrol >/dev/null 2>&1; then
+  echo "allocated_nodes:"
+  scontrol show hostnames "$SLURM_JOB_NODELIST"
+fi
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "Python not found or not executable: $PYTHON_BIN" >&2
   exit 1
 fi
+
+"$PYTHON_BIN" - "$REQUESTED_WALLTIME" <<'PY'
+import datetime as dt
+import re
+import sys
+
+walltime = sys.argv[1]
+match = re.fullmatch(r"(?:(\d+)-)?(\d+):(\d+):(\d+)", walltime)
+if match:
+    days = int(match.group(1) or 0)
+    hours = int(match.group(2))
+    minutes = int(match.group(3))
+    seconds = int(match.group(4))
+    finish = dt.datetime.now().astimezone() + dt.timedelta(
+        days=days,
+        hours=hours,
+        minutes=minutes,
+        seconds=seconds,
+    )
+    print("walltime_limit_finish_by=" + finish.isoformat(timespec="seconds"))
+else:
+    print("walltime_limit_finish_by=unknown")
+PY
 
 if [[ ! -f "$REPO_ROOT/train_minimal_graph_model.py" ]]; then
   echo "Missing script: $REPO_ROOT/train_minimal_graph_model.py" >&2
@@ -131,6 +174,11 @@ echo "USE_ESM2=$USE_ESM2"
 echo "USE_DSSP=$USE_DSSP"
 echo "USE_SASA=$USE_SASA"
 echo "CONTINUE_ON_FAILURE=$CONTINUE_ON_FAILURE"
+echo "USE_SRUN=$USE_SRUN"
+echo "SRUN_CPUS_PER_TASK=$SRUN_CPUS_PER_TASK"
+echo "REQUESTED_WALLTIME=$REQUESTED_WALLTIME"
+echo "REQUESTED_GPU_TOTAL=$REQUESTED_GPU_TOTAL"
+echo "REQUESTED_GPU_PER_NODE=$REQUESTED_GPU_PER_NODE"
 echo "GPU_IDS=$GPU_IDS"
 echo "MAX_PARALLEL=$MAX_PARALLEL"
 echo "EVAL_ROOT=$EVAL_ROOT"
@@ -200,6 +248,7 @@ PY
 export RUN_DIR REPO_ROOT RUN_ROOT GRAPH_CACHE_DIR SPLIT_DIR PYTHON_BIN FRAMEWORK
 export ASPECTS MIN_TERM_FREQUENCY EPOCHS BATCH_SIZE NUM_WORKERS HIDDEN_DIM
 export DROPOUT LR WEIGHT_DECAY METRIC_THRESHOLD FMAX_THRESHOLD_STEP PROGRESS_MODE PROGRESS_EVERY DEVICE SEED USE_ESM2 USE_DSSP USE_SASA
+export USE_SRUN SRUN_CPUS_PER_TASK REQUESTED_WALLTIME REQUESTED_GPU_TOTAL REQUESTED_GPU_PER_NODE
 export GPU_IDS MAX_PARALLEL EVAL_ROOT IA_FILE GO_OBO_FILE GROUND_TRUTH_FILE CAFAEVAL_BIN
 "$PYTHON_BIN" - <<'PY'
 import json
@@ -231,6 +280,11 @@ keys = [
     "USE_ESM2",
     "USE_DSSP",
     "USE_SASA",
+    "USE_SRUN",
+    "SRUN_CPUS_PER_TASK",
+    "REQUESTED_WALLTIME",
+    "REQUESTED_GPU_TOTAL",
+    "REQUESTED_GPU_PER_NODE",
     "GPU_IDS",
     "MAX_PARALLEL",
     "EVAL_ROOT",
@@ -243,6 +297,10 @@ payload = {
     "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
     "slurm_job_partition": os.environ.get("SLURM_JOB_PARTITION"),
     "slurm_cpus_per_task": os.environ.get("SLURM_CPUS_PER_TASK"),
+    "slurm_job_num_nodes": os.environ.get("SLURM_JOB_NUM_NODES"),
+    "slurm_ntasks": os.environ.get("SLURM_NTASKS"),
+    "slurm_gpus": os.environ.get("SLURM_GPUS"),
+    "slurm_gpus_on_node": os.environ.get("SLURM_GPUS_ON_NODE"),
     "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
     "config": {key: os.environ.get(key) for key in keys},
     "eval_inputs": {
@@ -258,6 +316,10 @@ ASPECTS_NORMALIZED="${ASPECTS//,/ }"
 read -r -a ASPECT_ARRAY <<< "$ASPECTS_NORMALIZED"
 GPU_IDS_NORMALIZED="${GPU_IDS//,/ }"
 read -r -a GPU_ID_ARRAY <<< "$GPU_IDS_NORMALIZED"
+USE_SRUN_ACTIVE=0
+if [[ "$USE_SRUN" == "1" && -n "${SLURM_JOB_ID:-}" ]]; then
+  USE_SRUN_ACTIVE=1
+fi
 
 if [[ "${#ASPECT_ARRAY[@]}" == "0" ]]; then
   echo "ASPECTS is empty." >&2
@@ -271,8 +333,17 @@ if [[ ! "$MAX_PARALLEL" =~ ^[0-9]+$ ]] || [[ "$MAX_PARALLEL" == "0" ]]; then
   echo "MAX_PARALLEL must be a positive integer: $MAX_PARALLEL" >&2
   exit 1
 fi
-if (( MAX_PARALLEL > ${#GPU_ID_ARRAY[@]} )); then
+if [[ ! "$SRUN_CPUS_PER_TASK" =~ ^[0-9]+$ ]] || [[ "$SRUN_CPUS_PER_TASK" == "0" ]]; then
+  echo "SRUN_CPUS_PER_TASK must be a positive integer: $SRUN_CPUS_PER_TASK" >&2
+  exit 1
+fi
+if [[ "$USE_SRUN_ACTIVE" != "1" ]] && (( MAX_PARALLEL > ${#GPU_ID_ARRAY[@]} )); then
   MAX_PARALLEL="${#GPU_ID_ARRAY[@]}"
+fi
+echo "USE_SRUN_ACTIVE=$USE_SRUN_ACTIVE"
+if [[ "$USE_SRUN_ACTIVE" == "1" && "${#ASPECT_ARRAY[@]}" -lt "$REQUESTED_GPU_TOTAL" ]]; then
+  echo "NOTE: requested $REQUESTED_GPU_TOTAL GPUs, but ASPECTS has ${#ASPECT_ARRAY[@]} independent task(s)."
+  echo "NOTE: this single-GPU-per-aspect training script can use at most one GPU per active aspect unless DDP is added."
 fi
 
 EXTRA_ARGS=("$@")
@@ -321,7 +392,11 @@ run_aspect() {
   fi
 
   {
-    printf 'CUDA_VISIBLE_DEVICES=%q ' "$gpu_id"
+    if [[ "$USE_SRUN_ACTIVE" == "1" ]]; then
+      printf 'srun --exclusive --nodes=1 --ntasks=1 --cpus-per-task=%q --gres=gpu:1 ' "$SRUN_CPUS_PER_TASK"
+    else
+      printf 'CUDA_VISIBLE_DEVICES=%q ' "$gpu_id"
+    fi
     printf '%q ' "${cmd[@]}"
     printf '%q ' "${EXTRA_ARGS[@]}"
     printf '\n'
@@ -332,8 +407,14 @@ run_aspect() {
   echo "[$aspect_upper] command=$(cat "$checkpoint_dir/command.sh")"
 
   set +e
-  CUDA_VISIBLE_DEVICES="$gpu_id" "${cmd[@]}" "${EXTRA_ARGS[@]}" 2>&1 | tee "$checkpoint_dir/train.log"
-  status_code="${PIPESTATUS[0]}"
+  if [[ "$USE_SRUN_ACTIVE" == "1" ]]; then
+    srun --exclusive --nodes=1 --ntasks=1 --cpus-per-task="$SRUN_CPUS_PER_TASK" --gres=gpu:1 \
+      "${cmd[@]}" "${EXTRA_ARGS[@]}" 2>&1 | tee "$checkpoint_dir/train.log"
+    status_code="${PIPESTATUS[0]}"
+  else
+    CUDA_VISIBLE_DEVICES="$gpu_id" "${cmd[@]}" "${EXTRA_ARGS[@]}" 2>&1 | tee "$checkpoint_dir/train.log"
+    status_code="${PIPESTATUS[0]}"
+  fi
   set -e
 
   end_time="$(date -Iseconds)"
@@ -416,7 +497,11 @@ for raw_aspect in "${ASPECT_ARRAY[@]}"; do
     fi
   done
 
-  gpu_id="${GPU_ID_ARRAY[${#batch_pids[@]}]}"
+  if [[ "$USE_SRUN_ACTIVE" == "1" ]]; then
+    gpu_id="srun-auto"
+  else
+    gpu_id="${GPU_ID_ARRAY[${#batch_pids[@]}]}"
+  fi
   run_aspect "$aspect_upper" "$aspect_lower" "$gpu_id" &
   batch_pids+=("$!")
   batch_labels+=("$aspect_upper")
@@ -454,6 +539,9 @@ for result_path in sorted(run_dir.glob("*/run_result.json")):
         "best_checkpoint_path": result.get("best_checkpoint_path"),
         "final_epoch": final_epoch.get("epoch"),
         "final_epoch_seconds": final_epoch.get("epoch_seconds"),
+        "average_epoch_seconds": final_epoch.get("average_epoch_seconds"),
+        "estimated_remaining_seconds": final_epoch.get("estimated_remaining_seconds"),
+        "estimated_finished_at": final_epoch.get("estimated_finished_at"),
     }
     for split_name in ("train", "val", "test"):
         metrics = final_epoch.get(split_name) or {}
@@ -479,6 +567,10 @@ base_columns = [
     "status_code",
     "gpu_id",
     "final_epoch",
+    "final_epoch_seconds",
+    "average_epoch_seconds",
+    "estimated_remaining_seconds",
+    "estimated_finished_at",
     "best_val_loss",
 ]
 metric_columns = []

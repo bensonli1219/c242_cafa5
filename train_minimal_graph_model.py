@@ -10,6 +10,7 @@ schema. The script supports both PyG and DGL backends.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import random
 import sys
@@ -135,6 +136,29 @@ def synchronize_device(device: Any) -> None:
         torch_module.cuda.synchronize(device)
     elif device.type == "mps" and hasattr(torch_module, "mps"):
         torch_module.mps.synchronize()
+
+
+def format_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "unknown"
+    seconds_int = max(0, int(round(seconds)))
+    days, remainder = divmod(seconds_int, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds_int = divmod(remainder, 60)
+    if days:
+        return f"{days}d{hours:02d}h{minutes:02d}m{seconds_int:02d}s"
+    if hours:
+        return f"{hours}h{minutes:02d}m{seconds_int:02d}s"
+    if minutes:
+        return f"{minutes}m{seconds_int:02d}s"
+    return f"{seconds_int}s"
+
+
+def timestamp_after(seconds: float | None) -> str:
+    if seconds is None:
+        return "unknown"
+    eta = dt.datetime.now().astimezone() + dt.timedelta(seconds=max(0.0, seconds))
+    return eta.isoformat(timespec="seconds")
 
 
 def micro_f1_from_logits(logits: Any, labels: Any, threshold: float = 0.5) -> float:
@@ -403,6 +427,7 @@ def run_epoch(
         progress_mode=progress_mode,
         total_batches=total_batches,
     )
+    split_start = time.perf_counter()
 
     context = torch_module.enable_grad() if is_training else torch_module.inference_mode()
     with context:
@@ -424,9 +449,17 @@ def run_epoch(
             ):
                 total_label = "?" if total_batches is None else str(total_batches)
                 running_loss = total_loss / total_graphs if total_graphs else 0.0
+                elapsed_seconds = time.perf_counter() - split_start
+                remaining_seconds = None
+                if total_batches is not None and batch_index:
+                    estimated_total_seconds = elapsed_seconds * total_batches / batch_index
+                    remaining_seconds = max(0.0, estimated_total_seconds - elapsed_seconds)
                 print(
                     f"[progress] {epoch_label} batch={batch_index}/{total_label} "
-                    f"graphs={total_graphs} loss={running_loss:.4f}",
+                    f"graphs={total_graphs} loss={running_loss:.4f} "
+                    f"elapsed={format_duration(elapsed_seconds)} "
+                    f"remaining={format_duration(remaining_seconds)} "
+                    f"eta={timestamp_after(remaining_seconds)}",
                     flush=True,
                 )
     synchronize_device(device)
@@ -546,6 +579,8 @@ def main(argv: list[str] | None = None) -> int:
     best_val_loss = float("inf")
     best_checkpoint_path = checkpoint_dir / "best.pt"
     summary_path = checkpoint_dir / "summary.json"
+    training_started_at = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    training_start = time.perf_counter()
 
     for epoch in range(1, args.epochs + 1):
         epoch_start = time.perf_counter()
@@ -599,9 +634,17 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         epoch_seconds = time.perf_counter() - epoch_start
+        total_elapsed_seconds = time.perf_counter() - training_start
+        average_epoch_seconds = total_elapsed_seconds / epoch
+        estimated_remaining_seconds = average_epoch_seconds * (args.epochs - epoch)
+        estimated_finished_at = timestamp_after(estimated_remaining_seconds)
         record = {
             "epoch": epoch,
             "epoch_seconds": epoch_seconds,
+            "total_elapsed_seconds": total_elapsed_seconds,
+            "average_epoch_seconds": average_epoch_seconds,
+            "estimated_remaining_seconds": estimated_remaining_seconds,
+            "estimated_finished_at": estimated_finished_at,
             "train": train_metrics,
             "val": val_metrics,
             "test": test_metrics,
@@ -615,7 +658,10 @@ def main(argv: list[str] | None = None) -> int:
             f"val_macro_f1={val_metrics['macro_f1']:.4f} val_fmax={val_metrics['fmax']:.4f} "
             f"test_loss={test_metrics['loss']:.4f} test_micro_f1={test_metrics['micro_f1']:.4f} "
             f"test_macro_f1={test_metrics['macro_f1']:.4f} test_fmax={test_metrics['fmax']:.4f} "
-            f"seconds={epoch_seconds:.2f}"
+            f"seconds={epoch_seconds:.2f} "
+            f"avg_epoch_seconds={average_epoch_seconds:.2f} "
+            f"estimated_remaining={format_duration(estimated_remaining_seconds)} "
+            f"eta={estimated_finished_at}"
         )
 
         if val_metrics["loss"] <= best_val_loss:
@@ -653,6 +699,7 @@ def main(argv: list[str] | None = None) -> int:
             "progress_every": args.progress_every,
             "best_val_loss": best_val_loss,
             "best_checkpoint_path": str(best_checkpoint_path.resolve()),
+            "training_started_at": training_started_at,
             "history": history,
         }
         summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
