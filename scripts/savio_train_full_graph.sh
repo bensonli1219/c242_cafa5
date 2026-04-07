@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --gres=gpu:4
 #SBATCH --mem=64G
-# savio_normal is documented with a 72-hour cap; use an allowed condo QoS if five days is rejected.
-#SBATCH --time=5-00:00:00
+# savio_normal max walltime is 72 hours.
+#SBATCH --time=72:00:00
 #SBATCH --output=/global/scratch/users/%u/logs/train_graph_full_%j.out
 #SBATCH --error=/global/scratch/users/%u/logs/train_graph_full_%j.err
 
@@ -44,7 +44,7 @@ USE_SASA="${USE_SASA:-1}"
 CONTINUE_ON_FAILURE="${CONTINUE_ON_FAILURE:-0}"
 USE_SRUN="${USE_SRUN:-1}"
 SRUN_CPUS_PER_TASK="${SRUN_CPUS_PER_TASK:-${SLURM_CPUS_PER_TASK:-2}}"
-REQUESTED_WALLTIME="${REQUESTED_WALLTIME:-5-00:00:00}"
+REQUESTED_WALLTIME="${REQUESTED_WALLTIME:-72:00:00}"
 REQUESTED_GPU_TOTAL="${REQUESTED_GPU_TOTAL:-8}"
 REQUESTED_GPU_PER_NODE="${REQUESTED_GPU_PER_NODE:-4}"
 GPU_IDS="${GPU_IDS:-0 1 2 3}"
