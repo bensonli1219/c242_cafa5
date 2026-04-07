@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,13 @@ def positive_float(value: str) -> float:
     return parsed
 
 
+def probability_float(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0 or parsed > 1:
+        raise argparse.ArgumentTypeError("value must be between 0 and 1")
+    return parsed
+
+
 def require_torch():
     return graphs.require_torch()
 
@@ -88,6 +96,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dropout", type=positive_float, default=0.2)
     parser.add_argument("--lr", type=positive_float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--metric-threshold", type=probability_float, default=0.5)
+    parser.add_argument("--fmax-threshold-step", type=positive_float, default=0.01)
+    parser.add_argument("--progress-mode", choices=["auto", "tqdm", "log", "none"], default="auto")
+    parser.add_argument("--progress-every", type=positive_int, default=25)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="cpu")
     parser.add_argument("--seed", type=int, default=dataloaders.DEFAULT_SPLIT_SEED)
     parser.add_argument("--checkpoint-dir", type=Path, default=None)
@@ -125,17 +137,139 @@ def synchronize_device(device: Any) -> None:
         torch_module.mps.synchronize()
 
 
-def micro_f1_from_logits(logits: Any, labels: Any) -> float:
+def micro_f1_from_logits(logits: Any, labels: Any, threshold: float = 0.5) -> float:
     torch_module = require_torch()
-    predictions = torch_module.sigmoid(logits) >= 0.5
+    predictions = torch_module.sigmoid(logits) >= threshold
     targets = labels >= 0.5
     true_positive = torch_module.logical_and(predictions, targets).sum().item()
     false_positive = torch_module.logical_and(predictions, torch_module.logical_not(targets)).sum().item()
     false_negative = torch_module.logical_and(torch_module.logical_not(predictions), targets).sum().item()
-    denominator = (2 * true_positive) + false_positive + false_negative
-    if denominator == 0:
-        return 0.0
-    return float((2 * true_positive) / denominator)
+    micro_precision = _safe_ratio(true_positive, true_positive + false_positive)
+    micro_recall = _safe_ratio(true_positive, true_positive + false_negative)
+    return _safe_ratio(2 * micro_precision * micro_recall, micro_precision + micro_recall)
+
+
+def _safe_ratio(numerator: float, denominator: float) -> float:
+    return 0.0 if denominator == 0 else float(numerator / denominator)
+
+
+def _threshold_values(step: float) -> list[float]:
+    if step <= 0:
+        raise ValueError("fmax threshold step must be positive")
+    values = [0.0]
+    current = step
+    while current < 1.0:
+        values.append(float(current))
+        current += step
+    if values[-1] != 1.0:
+        values.append(1.0)
+    return values
+
+
+def fmax_from_scores(scores: Any, targets: Any, threshold_step: float = 0.01) -> dict[str, float]:
+    torch_module = require_torch()
+    best = {
+        "fmax": 0.0,
+        "fmax_threshold": 0.0,
+        "fmax_precision": 0.0,
+        "fmax_recall": 0.0,
+    }
+    for threshold in _threshold_values(threshold_step):
+        predictions = scores >= threshold
+        true_positive = torch_module.logical_and(predictions, targets).sum().item()
+        false_positive = torch_module.logical_and(predictions, torch_module.logical_not(targets)).sum().item()
+        false_negative = torch_module.logical_and(torch_module.logical_not(predictions), targets).sum().item()
+        precision = _safe_ratio(true_positive, true_positive + false_positive)
+        recall = _safe_ratio(true_positive, true_positive + false_negative)
+        f1 = _safe_ratio(2 * precision * recall, precision + recall)
+        if f1 > best["fmax"]:
+            best = {
+                "fmax": f1,
+                "fmax_threshold": float(threshold),
+                "fmax_precision": precision,
+                "fmax_recall": recall,
+            }
+    return best
+
+
+def multilabel_metrics_from_logits(
+    logits: Any,
+    labels: Any,
+    threshold: float = 0.5,
+    fmax_threshold_step: float = 0.01,
+) -> dict[str, float]:
+    torch_module = require_torch()
+    scores = torch_module.sigmoid(logits)
+    targets = labels >= 0.5
+    predictions = scores >= threshold
+
+    true_positive = torch_module.logical_and(predictions, targets).sum().item()
+    false_positive = torch_module.logical_and(predictions, torch_module.logical_not(targets)).sum().item()
+    false_negative = torch_module.logical_and(torch_module.logical_not(predictions), targets).sum().item()
+    micro_precision = _safe_ratio(true_positive, true_positive + false_positive)
+    micro_recall = _safe_ratio(true_positive, true_positive + false_negative)
+    micro_f1 = _safe_ratio(2 * micro_precision * micro_recall, micro_precision + micro_recall)
+
+    true_positive_by_label = torch_module.logical_and(predictions, targets).sum(dim=0).float()
+    false_positive_by_label = torch_module.logical_and(predictions, torch_module.logical_not(targets)).sum(dim=0).float()
+    false_negative_by_label = torch_module.logical_and(torch_module.logical_not(predictions), targets).sum(dim=0).float()
+    macro_precision_by_label = torch_module.where(
+        (true_positive_by_label + false_positive_by_label) > 0,
+        true_positive_by_label / (true_positive_by_label + false_positive_by_label),
+        torch_module.zeros_like(true_positive_by_label),
+    )
+    macro_recall_by_label = torch_module.where(
+        (true_positive_by_label + false_negative_by_label) > 0,
+        true_positive_by_label / (true_positive_by_label + false_negative_by_label),
+        torch_module.zeros_like(true_positive_by_label),
+    )
+    macro_f1_by_label = torch_module.where(
+        ((2 * true_positive_by_label) + false_positive_by_label + false_negative_by_label) > 0,
+        (2 * true_positive_by_label)
+        / ((2 * true_positive_by_label) + false_positive_by_label + false_negative_by_label),
+        torch_module.zeros_like(true_positive_by_label),
+    )
+    labels_with_positive = targets.sum(dim=0) > 0
+
+    metrics = {
+        "micro_precision": micro_precision,
+        "micro_recall": micro_recall,
+        "micro_f1": micro_f1,
+        "macro_precision": float(macro_precision_by_label.mean().item()) if macro_precision_by_label.numel() else 0.0,
+        "macro_recall": float(macro_recall_by_label.mean().item()) if macro_recall_by_label.numel() else 0.0,
+        "macro_f1": float(macro_f1_by_label.mean().item()) if macro_f1_by_label.numel() else 0.0,
+        "macro_f1_positive_labels": (
+            float(macro_f1_by_label[labels_with_positive].mean().item()) if labels_with_positive.any().item() else 0.0
+        ),
+        "label_count": float(targets.shape[1]) if targets.ndim > 1 else 0.0,
+        "label_count_with_positive": float(labels_with_positive.sum().item()),
+        "metric_threshold": float(threshold),
+        "fmax_threshold_step": float(fmax_threshold_step),
+    }
+    metrics.update(fmax_from_scores(scores=scores, targets=targets, threshold_step=fmax_threshold_step))
+    return metrics
+
+
+def empty_metrics(metric_threshold: float = 0.5, fmax_threshold_step: float = 0.01) -> dict[str, float]:
+    return {
+        "loss": 0.0,
+        "micro_precision": 0.0,
+        "micro_recall": 0.0,
+        "micro_f1": 0.0,
+        "macro_precision": 0.0,
+        "macro_recall": 0.0,
+        "macro_f1": 0.0,
+        "macro_f1_positive_labels": 0.0,
+        "fmax": 0.0,
+        "fmax_threshold": 0.0,
+        "fmax_precision": 0.0,
+        "fmax_recall": 0.0,
+        "label_count": 0.0,
+        "label_count_with_positive": 0.0,
+        "metric_threshold": float(metric_threshold),
+        "fmax_threshold_step": float(fmax_threshold_step),
+        "graphs": 0.0,
+    }
 
 
 class MinimalPygClassifier(NNModuleBase):
@@ -215,6 +349,28 @@ def batch_graph_count(batch: Any, framework: str) -> int:
     raise ValueError(f"Unknown framework: {framework}")
 
 
+def loader_batch_count(loader: Any) -> int | None:
+    try:
+        return len(loader)
+    except TypeError:
+        return None
+
+
+def progress_iterable(loader: Any, label: str, progress_mode: str, total_batches: int | None):
+    if progress_mode == "none":
+        return loader, "none"
+    if progress_mode == "tqdm" or (progress_mode == "auto" and sys.stderr.isatty()):
+        try:
+            from tqdm.auto import tqdm
+        except ImportError:
+            print(f"[progress] tqdm is not installed; falling back to log mode for {label}", flush=True)
+        else:
+            return tqdm(loader, total=total_batches, desc=label, leave=False, dynamic_ncols=True), "tqdm"
+    if progress_mode in {"auto", "log"}:
+        return loader, "log"
+    return loader, "none"
+
+
 def run_epoch(
     model: Any,
     loader: Any,
@@ -222,6 +378,12 @@ def run_epoch(
     device: Any,
     optimizer: Any | None = None,
     loss_fn: Any | None = None,
+    metric_threshold: float = 0.5,
+    fmax_threshold_step: float = 0.01,
+    epoch: int | None = None,
+    split_name: str = "split",
+    progress_mode: str = "auto",
+    progress_every: int = 25,
 ) -> dict[str, float]:
     torch_module = require_torch()
     is_training = optimizer is not None
@@ -233,10 +395,18 @@ def run_epoch(
     total_graphs = 0
     logits_parts = []
     label_parts = []
+    total_batches = loader_batch_count(loader)
+    epoch_label = f"epoch={epoch} {split_name}" if epoch is not None else split_name
+    batch_iterable, active_progress_mode = progress_iterable(
+        loader,
+        label=epoch_label,
+        progress_mode=progress_mode,
+        total_batches=total_batches,
+    )
 
     context = torch_module.enable_grad() if is_training else torch_module.inference_mode()
     with context:
-        for batch in loader:
+        for batch_index, batch in enumerate(batch_iterable, start=1):
             batch = move_batch_to_device(batch, framework=framework, device=device)
             labels = extract_labels(batch, framework=framework)
             logits = model(batch)
@@ -249,20 +419,35 @@ def run_epoch(
             total_graphs += batch_graph_count(batch, framework=framework)
             logits_parts.append(logits.detach().cpu())
             label_parts.append(labels.detach().cpu())
+            if active_progress_mode == "log" and (
+                batch_index == 1 or batch_index % progress_every == 0 or batch_index == total_batches
+            ):
+                total_label = "?" if total_batches is None else str(total_batches)
+                running_loss = total_loss / total_graphs if total_graphs else 0.0
+                print(
+                    f"[progress] {epoch_label} batch={batch_index}/{total_label} "
+                    f"graphs={total_graphs} loss={running_loss:.4f}",
+                    flush=True,
+                )
     synchronize_device(device)
 
     mean_loss = total_loss / total_graphs if total_graphs else 0.0
     if logits_parts:
         all_logits = torch_module.cat(logits_parts, dim=0)
         all_labels = torch_module.cat(label_parts, dim=0)
-        micro_f1 = micro_f1_from_logits(all_logits, all_labels)
+        metrics = multilabel_metrics_from_logits(
+            all_logits,
+            all_labels,
+            threshold=metric_threshold,
+            fmax_threshold_step=fmax_threshold_step,
+        )
     else:
-        micro_f1 = 0.0
-    return {
+        metrics = empty_metrics(metric_threshold=metric_threshold, fmax_threshold_step=fmax_threshold_step)
+    metrics.update({
         "loss": mean_loss,
-        "micro_f1": micro_f1,
         "graphs": float(total_graphs),
-    }
+    })
+    return metrics
 
 
 def build_model(framework: str, output_dim: int, hidden_dim: int, dropout: float):
@@ -371,6 +556,12 @@ def main(argv: list[str] | None = None) -> int:
             device=device,
             optimizer=optimizer,
             loss_fn=loss_fn,
+            metric_threshold=args.metric_threshold,
+            fmax_threshold_step=args.fmax_threshold_step,
+            epoch=epoch,
+            split_name=f"{args.aspect} train",
+            progress_mode=args.progress_mode,
+            progress_every=args.progress_every,
         )
         val_metrics = run_epoch(
             model=model,
@@ -379,7 +570,16 @@ def main(argv: list[str] | None = None) -> int:
             device=device,
             optimizer=None,
             loss_fn=loss_fn,
-        ) if len(loaders["val"].dataset) > 0 else {"loss": 0.0, "micro_f1": 0.0, "graphs": 0.0}
+            metric_threshold=args.metric_threshold,
+            fmax_threshold_step=args.fmax_threshold_step,
+            epoch=epoch,
+            split_name=f"{args.aspect} val",
+            progress_mode=args.progress_mode,
+            progress_every=args.progress_every,
+        ) if len(loaders["val"].dataset) > 0 else empty_metrics(
+            metric_threshold=args.metric_threshold,
+            fmax_threshold_step=args.fmax_threshold_step,
+        )
         test_metrics = run_epoch(
             model=model,
             loader=loaders["test"],
@@ -387,7 +587,16 @@ def main(argv: list[str] | None = None) -> int:
             device=device,
             optimizer=None,
             loss_fn=loss_fn,
-        ) if len(loaders["test"].dataset) > 0 else {"loss": 0.0, "micro_f1": 0.0, "graphs": 0.0}
+            metric_threshold=args.metric_threshold,
+            fmax_threshold_step=args.fmax_threshold_step,
+            epoch=epoch,
+            split_name=f"{args.aspect} test",
+            progress_mode=args.progress_mode,
+            progress_every=args.progress_every,
+        ) if len(loaders["test"].dataset) > 0 else empty_metrics(
+            metric_threshold=args.metric_threshold,
+            fmax_threshold_step=args.fmax_threshold_step,
+        )
 
         epoch_seconds = time.perf_counter() - epoch_start
         record = {
@@ -400,9 +609,12 @@ def main(argv: list[str] | None = None) -> int:
         history.append(record)
         print(
             f"epoch={epoch} "
-            f"train_loss={train_metrics['loss']:.4f} train_f1={train_metrics['micro_f1']:.4f} "
-            f"val_loss={val_metrics['loss']:.4f} val_f1={val_metrics['micro_f1']:.4f} "
-            f"test_loss={test_metrics['loss']:.4f} test_f1={test_metrics['micro_f1']:.4f} "
+            f"train_loss={train_metrics['loss']:.4f} train_micro_f1={train_metrics['micro_f1']:.4f} "
+            f"train_macro_f1={train_metrics['macro_f1']:.4f} train_fmax={train_metrics['fmax']:.4f} "
+            f"val_loss={val_metrics['loss']:.4f} val_micro_f1={val_metrics['micro_f1']:.4f} "
+            f"val_macro_f1={val_metrics['macro_f1']:.4f} val_fmax={val_metrics['fmax']:.4f} "
+            f"test_loss={test_metrics['loss']:.4f} test_micro_f1={test_metrics['micro_f1']:.4f} "
+            f"test_macro_f1={test_metrics['macro_f1']:.4f} test_fmax={test_metrics['fmax']:.4f} "
             f"seconds={epoch_seconds:.2f}"
         )
 
@@ -417,6 +629,9 @@ def main(argv: list[str] | None = None) -> int:
                     "optimizer_state": optimizer.state_dict(),
                     "val_loss": val_metrics["loss"],
                     "val_micro_f1": val_metrics["micro_f1"],
+                    "val_macro_f1": val_metrics["macro_f1"],
+                    "val_fmax": val_metrics["fmax"],
+                    "val_fmax_threshold": val_metrics["fmax_threshold"],
                     "args": vars(args),
                 },
                 best_checkpoint_path,
@@ -432,6 +647,10 @@ def main(argv: list[str] | None = None) -> int:
             "dropout": args.dropout,
             "lr": args.lr,
             "weight_decay": args.weight_decay,
+            "metric_threshold": args.metric_threshold,
+            "fmax_threshold_step": args.fmax_threshold_step,
+            "progress_mode": args.progress_mode,
+            "progress_every": args.progress_every,
             "best_val_loss": best_val_loss,
             "best_checkpoint_path": str(best_checkpoint_path.resolve()),
             "history": history,

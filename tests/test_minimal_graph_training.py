@@ -126,6 +126,40 @@ class MinimalGraphTrainingTests(unittest.TestCase):
 
         self.assertEqual(tuple(logits.shape), (2, 1))
 
+    def test_multilabel_metrics_include_macro_and_fmax(self) -> None:
+        logits = graphs.torch.tensor(
+            [
+                [10.0, -10.0],
+                [10.0, 10.0],
+                [-10.0, 10.0],
+                [-10.0, -10.0],
+            ]
+        )
+        labels = graphs.torch.tensor(
+            [
+                [1.0, 0.0],
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [0.0, 0.0],
+            ]
+        )
+
+        metrics = training.multilabel_metrics_from_logits(
+            logits,
+            labels,
+            threshold=0.5,
+            fmax_threshold_step=0.5,
+        )
+
+        self.assertAlmostEqual(metrics["micro_precision"], 0.75)
+        self.assertAlmostEqual(metrics["micro_recall"], 1.0)
+        self.assertAlmostEqual(metrics["micro_f1"], 6 / 7)
+        self.assertAlmostEqual(metrics["macro_f1"], (1.0 + (2 / 3)) / 2)
+        self.assertAlmostEqual(metrics["macro_f1_positive_labels"], (1.0 + (2 / 3)) / 2)
+        self.assertAlmostEqual(metrics["fmax"], 6 / 7)
+        self.assertEqual(metrics["label_count"], 2.0)
+        self.assertEqual(metrics["label_count_with_positive"], 2.0)
+
 
 if __name__ == "__main__":
     unittest.main()
