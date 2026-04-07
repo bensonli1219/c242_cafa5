@@ -3,11 +3,10 @@
 #SBATCH --account=ic_chem242
 #SBATCH --partition=savio2_1080ti
 #SBATCH --qos=savio_normal
-#SBATCH --nodes=2
+#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=4
 #SBATCH --cpus-per-task=2
 #SBATCH --gres=gpu:4
-#SBATCH --mem=64G
 # savio_normal max walltime is 72 hours.
 #SBATCH --time=72:00:00
 #SBATCH --output=/global/scratch/users/%u/logs/train_graph_full_%j.out
@@ -45,10 +44,10 @@ CONTINUE_ON_FAILURE="${CONTINUE_ON_FAILURE:-0}"
 USE_SRUN="${USE_SRUN:-1}"
 SRUN_CPUS_PER_TASK="${SRUN_CPUS_PER_TASK:-${SLURM_CPUS_PER_TASK:-2}}"
 REQUESTED_WALLTIME="${REQUESTED_WALLTIME:-72:00:00}"
-REQUESTED_GPU_TOTAL="${REQUESTED_GPU_TOTAL:-8}"
+REQUESTED_GPU_TOTAL="${REQUESTED_GPU_TOTAL:-4}"
 REQUESTED_GPU_PER_NODE="${REQUESTED_GPU_PER_NODE:-4}"
 GPU_IDS="${GPU_IDS:-0 1 2 3}"
-MAX_PARALLEL="${MAX_PARALLEL:-8}"
+MAX_PARALLEL="${MAX_PARALLEL:-4}"
 
 EVAL_ROOT="${EVAL_ROOT:-$HOME/cafa5}"
 IA_FILE="${IA_FILE:-$EVAL_ROOT/IA.txt}"
