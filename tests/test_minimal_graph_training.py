@@ -160,6 +160,43 @@ class MinimalGraphTrainingTests(unittest.TestCase):
         self.assertEqual(metrics["label_count"], 2.0)
         self.assertEqual(metrics["label_count_with_positive"], 2.0)
 
+    def test_metric_selection_helpers(self) -> None:
+        record = {
+            "val": {
+                "loss": 0.2,
+                "micro_f1": 0.5,
+                "macro_f1": 0.1,
+                "fmax": 0.4,
+            }
+        }
+
+        self.assertEqual(training.metric_optimization_mode("val_loss"), "min")
+        self.assertEqual(training.metric_optimization_mode("val_fmax"), "max")
+        self.assertAlmostEqual(training.metric_value_from_record(record, "val_fmax"), 0.4)
+        self.assertTrue(training.metric_is_improved(0.42, 0.4, "max", min_delta=0.01))
+        self.assertFalse(training.metric_is_improved(0.405, 0.4, "max", min_delta=0.01))
+        self.assertTrue(training.metric_is_improved(0.18, 0.2, "min", min_delta=0.01))
+
+    def test_build_pos_weight_tensor_supports_power_and_cap(self) -> None:
+        class StubDataset:
+            aspect = "MFO"
+            vocab = ["GO:1000", "GO:2000"]
+            term_to_index = {"GO:1000": 0, "GO:2000": 1}
+            entries = [
+                {"labels": {"MFO": ["GO:1000"]}},
+                {"labels": {"MFO": ["GO:1000", "GO:2000"]}},
+                {"labels": {"MFO": []}},
+                {"labels": {"MFO": []}},
+            ]
+
+        pos_weight = training.build_pos_weight_tensor(StubDataset(), power=1.0, max_pos_weight=None)
+        self.assertAlmostEqual(float(pos_weight[0].item()), 1.0)
+        self.assertAlmostEqual(float(pos_weight[1].item()), 3.0)
+
+        capped = training.build_pos_weight_tensor(StubDataset(), power=0.5, max_pos_weight=1.5)
+        self.assertAlmostEqual(float(capped[0].item()), 1.0)
+        self.assertAlmostEqual(float(capped[1].item()), 1.5)
+
 
 if __name__ == "__main__":
     unittest.main()

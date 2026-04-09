@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import math
 import random
 import sys
 import time
@@ -51,10 +52,31 @@ def positive_int(value: str) -> int:
     return parsed
 
 
+def non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be a non-negative integer")
+    return parsed
+
+
 def positive_float(value: str) -> float:
     parsed = float(value)
     if parsed <= 0:
         raise argparse.ArgumentTypeError("value must be positive")
+    return parsed
+
+
+def non_negative_float(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be non-negative")
+    return parsed
+
+
+def reduction_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0 or parsed >= 1:
+        raise argparse.ArgumentTypeError("value must be between 0 and 1")
     return parsed
 
 
@@ -97,8 +119,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dropout", type=positive_float, default=0.2)
     parser.add_argument("--lr", type=positive_float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--loss-function", choices=["bce", "weighted_bce"], default="bce")
+    parser.add_argument("--pos-weight-power", type=positive_float, default=1.0)
+    parser.add_argument("--max-pos-weight", type=positive_float, default=None)
     parser.add_argument("--metric-threshold", type=probability_float, default=0.5)
     parser.add_argument("--fmax-threshold-step", type=positive_float, default=0.01)
+    parser.add_argument(
+        "--checkpoint-metric",
+        choices=["val_loss", "val_micro_f1", "val_macro_f1", "val_fmax"],
+        default="val_loss",
+    )
+    parser.add_argument("--early-stopping-patience", type=non_negative_int, default=0)
+    parser.add_argument("--early-stopping-min-delta", type=non_negative_float, default=0.0)
+    parser.add_argument("--lr-scheduler", choices=["none", "plateau"], default="none")
+    parser.add_argument("--lr-plateau-factor", type=reduction_float, default=0.5)
+    parser.add_argument("--lr-plateau-patience", type=non_negative_int, default=1)
+    parser.add_argument("--min-lr", type=non_negative_float, default=1e-6)
     parser.add_argument("--progress-mode", choices=["auto", "tqdm", "log", "none"], default="auto")
     parser.add_argument("--progress-every", type=positive_int, default=25)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="cpu")
@@ -159,6 +195,32 @@ def timestamp_after(seconds: float | None) -> str:
         return "unknown"
     eta = dt.datetime.now().astimezone() + dt.timedelta(seconds=max(0.0, seconds))
     return eta.isoformat(timespec="seconds")
+
+
+def metric_optimization_mode(metric_name: str) -> str:
+    return "min" if metric_name.endswith("loss") else "max"
+
+
+def metric_value_from_record(record: dict[str, Any], metric_name: str) -> float:
+    split_name, _, metric_key = metric_name.partition("_")
+    if split_name not in dataloaders.SPLIT_NAMES or not metric_key:
+        raise ValueError(f"Unsupported metric name: {metric_name}")
+    split_metrics = record.get(split_name) or {}
+    if metric_key not in split_metrics:
+        raise KeyError(f"Metric {metric_name} was not found in record.")
+    return float(split_metrics[metric_key])
+
+
+def metric_is_improved(candidate: float, best: float | None, mode: str, min_delta: float = 0.0) -> bool:
+    if not math.isfinite(candidate):
+        return False
+    if best is None or not math.isfinite(best):
+        return True
+    if mode == "min":
+        return candidate < (best - min_delta)
+    if mode == "max":
+        return candidate > (best + min_delta)
+    raise ValueError(f"Unknown optimization mode: {mode}")
 
 
 def micro_f1_from_logits(logits: Any, labels: Any, threshold: float = 0.5) -> float:
@@ -294,6 +356,122 @@ def empty_metrics(metric_threshold: float = 0.5, fmax_threshold_step: float = 0.
         "fmax_threshold_step": float(fmax_threshold_step),
         "graphs": 0.0,
     }
+
+
+def build_pos_weight_tensor(
+    dataset: Any,
+    power: float = 1.0,
+    max_pos_weight: float | None = None,
+):
+    torch_module = require_torch()
+    vocab = getattr(dataset, "vocab", None)
+    term_to_index = getattr(dataset, "term_to_index", None)
+    aspect = getattr(dataset, "aspect", None)
+    entries = getattr(dataset, "entries", None)
+    if vocab is None or term_to_index is None or aspect is None or entries is None:
+        raise ValueError("Dataset does not expose the attributes required to build class weights.")
+
+    positive_counts = torch_module.zeros(len(vocab), dtype=torch_module.float32)
+    for entry in entries:
+        labels = set((entry.get("labels") or {}).get(aspect, []))
+        for term in labels:
+            index = term_to_index.get(term)
+            if index is not None:
+                positive_counts[index] += 1.0
+
+    total_graphs = float(len(entries))
+    negative_counts = torch_module.clamp(torch_module.full_like(positive_counts, total_graphs) - positive_counts, min=0.0)
+    safe_positive_counts = torch_module.where(
+        positive_counts > 0,
+        positive_counts,
+        torch_module.ones_like(positive_counts),
+    )
+    pos_weight = negative_counts / safe_positive_counts
+    pos_weight = torch_module.where(
+        positive_counts > 0,
+        pos_weight,
+        torch_module.ones_like(pos_weight),
+    )
+    pos_weight = torch_module.clamp(pos_weight, min=1.0)
+    if power != 1.0:
+        pos_weight = torch_module.pow(pos_weight, float(power))
+    if max_pos_weight is not None:
+        pos_weight = torch_module.clamp(pos_weight, max=float(max_pos_weight))
+    return pos_weight
+
+
+def summarize_pos_weight_tensor(pos_weight: Any) -> dict[str, float]:
+    if int(pos_weight.numel()) == 0:
+        return {
+            "label_count": 0.0,
+            "weighted_label_count": 0.0,
+            "min": 1.0,
+            "max": 1.0,
+            "mean": 1.0,
+        }
+    weighted = pos_weight[pos_weight > 1.0]
+    return {
+        "label_count": float(pos_weight.numel()),
+        "weighted_label_count": float(weighted.numel()),
+        "min": float(pos_weight.min().item()),
+        "max": float(pos_weight.max().item()),
+        "mean": float(pos_weight.mean().item()),
+    }
+
+
+def build_loss_function(
+    args: argparse.Namespace,
+    train_dataset: Any,
+    device: Any,
+) -> tuple[Any, dict[str, Any]]:
+    torch_module = require_torch()
+    config: dict[str, Any] = {
+        "loss_function": args.loss_function,
+    }
+    if args.loss_function == "bce":
+        return torch_module.nn.BCEWithLogitsLoss(), config
+    if args.loss_function == "weighted_bce":
+        pos_weight = build_pos_weight_tensor(
+            train_dataset,
+            power=args.pos_weight_power,
+            max_pos_weight=args.max_pos_weight,
+        )
+        config.update(
+            {
+                "pos_weight_power": args.pos_weight_power,
+                "max_pos_weight": args.max_pos_weight,
+                "pos_weight_summary": summarize_pos_weight_tensor(pos_weight),
+            }
+        )
+        return torch_module.nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device)), config
+    raise ValueError(f"Unknown loss function: {args.loss_function}")
+
+
+def build_lr_scheduler(
+    args: argparse.Namespace,
+    optimizer: Any,
+) -> tuple[Any | None, dict[str, Any]]:
+    torch_module = require_torch()
+    if args.lr_scheduler == "none":
+        return None, {"lr_scheduler": "none"}
+    if args.lr_scheduler == "plateau":
+        mode = metric_optimization_mode(args.checkpoint_metric)
+        scheduler = torch_module.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode=mode,
+            factor=args.lr_plateau_factor,
+            patience=args.lr_plateau_patience,
+            min_lr=args.min_lr,
+        )
+        return scheduler, {
+            "lr_scheduler": args.lr_scheduler,
+            "mode": mode,
+            "monitor": args.checkpoint_metric,
+            "factor": args.lr_plateau_factor,
+            "patience": args.lr_plateau_patience,
+            "min_lr": args.min_lr,
+        }
+    raise ValueError(f"Unknown lr scheduler: {args.lr_scheduler}")
 
 
 class MinimalPygClassifier(NNModuleBase):
@@ -503,7 +681,7 @@ def build_model(framework: str, output_dim: int, hidden_dim: int, dropout: float
     raise ValueError(f"Unknown framework: {framework}")
 
 
-def build_training_objects(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
+def build_training_objects(args: argparse.Namespace) -> tuple[dict[str, Any], Any, dict[str, Any]]:
     split_dir = args.split_dir or (args.root / "splits")
     if not (split_dir / "summary.json").exists():
         dataloaders.export_split_manifests(
@@ -556,7 +734,7 @@ def build_training_objects(args: argparse.Namespace) -> tuple[dict[str, Any], An
         hidden_dim=args.hidden_dim,
         dropout=args.dropout,
     )
-    return loaders, model
+    return loaders, model, datasets
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -564,7 +742,7 @@ def main(argv: list[str] | None = None) -> int:
     require_torch()
     set_random_seed(args.seed)
     device = resolve_device(args.device)
-    loaders, model = build_training_objects(args)
+    loaders, model, datasets = build_training_objects(args)
 
     checkpoint_dir = args.checkpoint_dir or (
         args.root / "training_runs" / f"minimal_{args.framework}_{args.aspect.lower()}"
@@ -573,10 +751,17 @@ def main(argv: list[str] | None = None) -> int:
 
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    loss_fn = torch.nn.BCEWithLogitsLoss()
+    loss_fn, loss_config = build_loss_function(args, datasets["train"], device=device)
+    scheduler, scheduler_config = build_lr_scheduler(args, optimizer)
 
     history = []
     best_val_loss = float("inf")
+    best_checkpoint_metric = None
+    best_checkpoint_metric_mode = metric_optimization_mode(args.checkpoint_metric)
+    best_epoch = 0
+    epochs_without_improvement = 0
+    stopped_early = False
+    early_stopping_reason = ""
     best_checkpoint_path = checkpoint_dir / "best.pt"
     summary_path = checkpoint_dir / "summary.json"
     training_started_at = dt.datetime.now().astimezone().isoformat(timespec="seconds")
@@ -645,10 +830,14 @@ def main(argv: list[str] | None = None) -> int:
             "average_epoch_seconds": average_epoch_seconds,
             "estimated_remaining_seconds": estimated_remaining_seconds,
             "estimated_finished_at": estimated_finished_at,
+            "lr": float(optimizer.param_groups[0]["lr"]),
             "train": train_metrics,
             "val": val_metrics,
             "test": test_metrics,
         }
+        checkpoint_metric_value = metric_value_from_record(record, args.checkpoint_metric)
+        record["checkpoint_metric_name"] = args.checkpoint_metric
+        record["checkpoint_metric_value"] = checkpoint_metric_value
         history.append(record)
         print(
             f"epoch={epoch} "
@@ -658,6 +847,7 @@ def main(argv: list[str] | None = None) -> int:
             f"val_macro_f1={val_metrics['macro_f1']:.4f} val_fmax={val_metrics['fmax']:.4f} "
             f"test_loss={test_metrics['loss']:.4f} test_micro_f1={test_metrics['micro_f1']:.4f} "
             f"test_macro_f1={test_metrics['macro_f1']:.4f} test_fmax={test_metrics['fmax']:.4f} "
+            f"{args.checkpoint_metric}={checkpoint_metric_value:.4f} "
             f"seconds={epoch_seconds:.2f} "
             f"avg_epoch_seconds={average_epoch_seconds:.2f} "
             f"estimated_remaining={format_duration(estimated_remaining_seconds)} "
@@ -666,6 +856,19 @@ def main(argv: list[str] | None = None) -> int:
 
         if val_metrics["loss"] <= best_val_loss:
             best_val_loss = val_metrics["loss"]
+
+        if scheduler is not None:
+            scheduler.step(checkpoint_metric_value)
+
+        if metric_is_improved(
+            checkpoint_metric_value,
+            best_checkpoint_metric,
+            mode=best_checkpoint_metric_mode,
+            min_delta=args.early_stopping_min_delta,
+        ):
+            best_checkpoint_metric = checkpoint_metric_value
+            best_epoch = epoch
+            epochs_without_improvement = 0
             torch.save(
                 {
                     "framework": args.framework,
@@ -678,10 +881,21 @@ def main(argv: list[str] | None = None) -> int:
                     "val_macro_f1": val_metrics["macro_f1"],
                     "val_fmax": val_metrics["fmax"],
                     "val_fmax_threshold": val_metrics["fmax_threshold"],
+                    "checkpoint_metric_name": args.checkpoint_metric,
+                    "checkpoint_metric_value": checkpoint_metric_value,
                     "args": vars(args),
                 },
                 best_checkpoint_path,
             )
+        else:
+            epochs_without_improvement += 1
+
+        if args.early_stopping_patience > 0 and epochs_without_improvement >= args.early_stopping_patience:
+            stopped_early = True
+            early_stopping_reason = (
+                f"No {args.checkpoint_metric} improvement for {epochs_without_improvement} epoch(s)."
+            )
+            print(f"early_stopping epoch={epoch} reason={early_stopping_reason}", flush=True)
 
         summary = {
             "framework": args.framework,
@@ -693,8 +907,22 @@ def main(argv: list[str] | None = None) -> int:
             "dropout": args.dropout,
             "lr": args.lr,
             "weight_decay": args.weight_decay,
+            "loss_function": args.loss_function,
+            "loss_config": loss_config,
             "metric_threshold": args.metric_threshold,
             "fmax_threshold_step": args.fmax_threshold_step,
+            "checkpoint_metric": args.checkpoint_metric,
+            "best_checkpoint_metric": best_checkpoint_metric,
+            "best_checkpoint_metric_mode": best_checkpoint_metric_mode,
+            "best_epoch": best_epoch,
+            "early_stopping_patience": args.early_stopping_patience,
+            "early_stopping_min_delta": args.early_stopping_min_delta,
+            "epochs_completed": epoch,
+            "stopped_early": stopped_early,
+            "early_stopping_reason": early_stopping_reason,
+            "epochs_without_improvement": epochs_without_improvement,
+            "lr_scheduler": args.lr_scheduler,
+            "scheduler_config": scheduler_config,
             "progress_mode": args.progress_mode,
             "progress_every": args.progress_every,
             "best_val_loss": best_val_loss,
@@ -703,6 +931,8 @@ def main(argv: list[str] | None = None) -> int:
             "history": history,
         }
         summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        if stopped_early:
+            break
 
     return 0
 

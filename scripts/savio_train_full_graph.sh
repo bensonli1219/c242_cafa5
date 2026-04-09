@@ -31,8 +31,18 @@ HIDDEN_DIM="${HIDDEN_DIM:-128}"
 DROPOUT="${DROPOUT:-0.2}"
 LR="${LR:-0.001}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.0001}"
+LOSS_FUNCTION="${LOSS_FUNCTION:-bce}"
+POS_WEIGHT_POWER="${POS_WEIGHT_POWER:-1.0}"
+MAX_POS_WEIGHT="${MAX_POS_WEIGHT:-}"
 METRIC_THRESHOLD="${METRIC_THRESHOLD:-0.5}"
 FMAX_THRESHOLD_STEP="${FMAX_THRESHOLD_STEP:-0.01}"
+CHECKPOINT_METRIC="${CHECKPOINT_METRIC:-val_loss}"
+EARLY_STOPPING_PATIENCE="${EARLY_STOPPING_PATIENCE:-0}"
+EARLY_STOPPING_MIN_DELTA="${EARLY_STOPPING_MIN_DELTA:-0.0}"
+LR_SCHEDULER="${LR_SCHEDULER:-none}"
+LR_PLATEAU_FACTOR="${LR_PLATEAU_FACTOR:-0.5}"
+LR_PLATEAU_PATIENCE="${LR_PLATEAU_PATIENCE:-1}"
+MIN_LR="${MIN_LR:-1e-6}"
 PROGRESS_MODE="${PROGRESS_MODE:-log}"
 PROGRESS_EVERY="${PROGRESS_EVERY:-25}"
 DEVICE="${DEVICE:-auto}"
@@ -163,8 +173,18 @@ echo "HIDDEN_DIM=$HIDDEN_DIM"
 echo "DROPOUT=$DROPOUT"
 echo "LR=$LR"
 echo "WEIGHT_DECAY=$WEIGHT_DECAY"
+echo "LOSS_FUNCTION=$LOSS_FUNCTION"
+echo "POS_WEIGHT_POWER=$POS_WEIGHT_POWER"
+echo "MAX_POS_WEIGHT=$MAX_POS_WEIGHT"
 echo "METRIC_THRESHOLD=$METRIC_THRESHOLD"
 echo "FMAX_THRESHOLD_STEP=$FMAX_THRESHOLD_STEP"
+echo "CHECKPOINT_METRIC=$CHECKPOINT_METRIC"
+echo "EARLY_STOPPING_PATIENCE=$EARLY_STOPPING_PATIENCE"
+echo "EARLY_STOPPING_MIN_DELTA=$EARLY_STOPPING_MIN_DELTA"
+echo "LR_SCHEDULER=$LR_SCHEDULER"
+echo "LR_PLATEAU_FACTOR=$LR_PLATEAU_FACTOR"
+echo "LR_PLATEAU_PATIENCE=$LR_PLATEAU_PATIENCE"
+echo "MIN_LR=$MIN_LR"
 echo "PROGRESS_MODE=$PROGRESS_MODE"
 echo "PROGRESS_EVERY=$PROGRESS_EVERY"
 echo "DEVICE=$DEVICE"
@@ -246,7 +266,9 @@ PY
 
 export RUN_DIR REPO_ROOT RUN_ROOT GRAPH_CACHE_DIR SPLIT_DIR PYTHON_BIN FRAMEWORK
 export ASPECTS MIN_TERM_FREQUENCY EPOCHS BATCH_SIZE NUM_WORKERS HIDDEN_DIM
-export DROPOUT LR WEIGHT_DECAY METRIC_THRESHOLD FMAX_THRESHOLD_STEP PROGRESS_MODE PROGRESS_EVERY DEVICE SEED USE_ESM2 USE_DSSP USE_SASA
+export DROPOUT LR WEIGHT_DECAY LOSS_FUNCTION POS_WEIGHT_POWER MAX_POS_WEIGHT
+export METRIC_THRESHOLD FMAX_THRESHOLD_STEP CHECKPOINT_METRIC EARLY_STOPPING_PATIENCE EARLY_STOPPING_MIN_DELTA
+export LR_SCHEDULER LR_PLATEAU_FACTOR LR_PLATEAU_PATIENCE MIN_LR PROGRESS_MODE PROGRESS_EVERY DEVICE SEED USE_ESM2 USE_DSSP USE_SASA
 export USE_SRUN SRUN_CPUS_PER_TASK REQUESTED_WALLTIME REQUESTED_GPU_TOTAL REQUESTED_GPU_PER_NODE
 export GPU_IDS MAX_PARALLEL EVAL_ROOT IA_FILE GO_OBO_FILE GROUND_TRUTH_FILE CAFAEVAL_BIN
 "$PYTHON_BIN" - <<'PY'
@@ -270,8 +292,18 @@ keys = [
     "DROPOUT",
     "LR",
     "WEIGHT_DECAY",
+    "LOSS_FUNCTION",
+    "POS_WEIGHT_POWER",
+    "MAX_POS_WEIGHT",
     "METRIC_THRESHOLD",
     "FMAX_THRESHOLD_STEP",
+    "CHECKPOINT_METRIC",
+    "EARLY_STOPPING_PATIENCE",
+    "EARLY_STOPPING_MIN_DELTA",
+    "LR_SCHEDULER",
+    "LR_PLATEAU_FACTOR",
+    "LR_PLATEAU_PATIENCE",
+    "MIN_LR",
     "PROGRESS_MODE",
     "PROGRESS_EVERY",
     "DEVICE",
@@ -371,8 +403,17 @@ run_aspect() {
     --dropout "$DROPOUT"
     --lr "$LR"
     --weight-decay "$WEIGHT_DECAY"
+    --loss-function "$LOSS_FUNCTION"
+    --pos-weight-power "$POS_WEIGHT_POWER"
     --metric-threshold "$METRIC_THRESHOLD"
     --fmax-threshold-step "$FMAX_THRESHOLD_STEP"
+    --checkpoint-metric "$CHECKPOINT_METRIC"
+    --early-stopping-patience "$EARLY_STOPPING_PATIENCE"
+    --early-stopping-min-delta "$EARLY_STOPPING_MIN_DELTA"
+    --lr-scheduler "$LR_SCHEDULER"
+    --lr-plateau-factor "$LR_PLATEAU_FACTOR"
+    --lr-plateau-patience "$LR_PLATEAU_PATIENCE"
+    --min-lr "$MIN_LR"
     --progress-mode "$PROGRESS_MODE"
     --progress-every "$PROGRESS_EVERY"
     --device "$DEVICE"
@@ -388,6 +429,9 @@ run_aspect() {
   fi
   if [[ "$USE_SASA" != "1" ]]; then
     cmd+=(--disable-sasa)
+  fi
+  if [[ -n "$MAX_POS_WEIGHT" ]]; then
+    cmd+=(--max-pos-weight "$MAX_POS_WEIGHT")
   fi
 
   {
@@ -448,7 +492,13 @@ if summary_path.exists():
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     history = summary.get("history") or []
     payload["best_val_loss"] = summary.get("best_val_loss")
+    payload["best_checkpoint_metric_name"] = summary.get("checkpoint_metric")
+    payload["best_checkpoint_metric"] = summary.get("best_checkpoint_metric")
+    payload["best_epoch"] = summary.get("best_epoch")
     payload["best_checkpoint_path"] = summary.get("best_checkpoint_path")
+    payload["stopped_early"] = summary.get("stopped_early")
+    payload["loss_function"] = summary.get("loss_function")
+    payload["lr_scheduler"] = summary.get("lr_scheduler")
     if history:
         payload["final_epoch"] = history[-1]
 Path(checkpoint_dir, "run_result.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -535,12 +585,21 @@ for result_path in sorted(run_dir.glob("*/run_result.json")):
         "checkpoint_dir": result.get("checkpoint_dir"),
         "summary_path": result.get("summary_path"),
         "best_val_loss": result.get("best_val_loss"),
+        "best_checkpoint_metric_name": result.get("best_checkpoint_metric_name"),
+        "best_checkpoint_metric": result.get("best_checkpoint_metric"),
+        "best_epoch": result.get("best_epoch"),
         "best_checkpoint_path": result.get("best_checkpoint_path"),
+        "stopped_early": result.get("stopped_early"),
+        "loss_function": result.get("loss_function"),
+        "lr_scheduler": result.get("lr_scheduler"),
         "final_epoch": final_epoch.get("epoch"),
         "final_epoch_seconds": final_epoch.get("epoch_seconds"),
         "average_epoch_seconds": final_epoch.get("average_epoch_seconds"),
         "estimated_remaining_seconds": final_epoch.get("estimated_remaining_seconds"),
         "estimated_finished_at": final_epoch.get("estimated_finished_at"),
+        "final_lr": final_epoch.get("lr"),
+        "final_checkpoint_metric_name": final_epoch.get("checkpoint_metric_name"),
+        "final_checkpoint_metric_value": final_epoch.get("checkpoint_metric_value"),
     }
     for split_name in ("train", "val", "test"):
         metrics = final_epoch.get(split_name) or {}
@@ -571,6 +630,15 @@ base_columns = [
     "estimated_remaining_seconds",
     "estimated_finished_at",
     "best_val_loss",
+    "best_checkpoint_metric_name",
+    "best_checkpoint_metric",
+    "best_epoch",
+    "stopped_early",
+    "loss_function",
+    "lr_scheduler",
+    "final_lr",
+    "final_checkpoint_metric_name",
+    "final_checkpoint_metric_value",
 ]
 metric_columns = []
 for split_name in ("train", "val", "test"):
