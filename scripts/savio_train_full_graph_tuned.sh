@@ -1,4 +1,17 @@
 #!/bin/bash
+#SBATCH --job-name=train_graph_full_tuned
+#SBATCH --account=ic_chem242
+#SBATCH --partition=savio2_1080ti
+#SBATCH --qos=savio_normal
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=2
+#SBATCH --gres=gpu:4
+# savio_normal max walltime is 72 hours.
+#SBATCH --time=72:00:00
+#SBATCH --output=/global/scratch/users/%u/logs/train_graph_full_tuned_%j.out
+#SBATCH --error=/global/scratch/users/%u/logs/train_graph_full_tuned_%j.err
+
 # Tuned full-graph training wrapper for Savio.
 # Keeps the original batch orchestration but swaps in stronger defaults for
 # class imbalance, checkpoint selection, and learning-rate control.
