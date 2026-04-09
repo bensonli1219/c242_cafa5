@@ -18,8 +18,6 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 export FRAMEWORK="${FRAMEWORK:-pyg}"
 export ASPECTS="${ASPECTS:-BPO CCO MFO}"
 export MIN_TERM_FREQUENCY="${MIN_TERM_FREQUENCY:-20}"
@@ -44,4 +42,13 @@ export MIN_LR="${MIN_LR:-1e-6}"
 RUN_STAMP="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 export RUN_NAME="${RUN_NAME:-full_graph_tuned_${FRAMEWORK}_mtf${MIN_TERM_FREQUENCY}_${RUN_STAMP}}"
 
-exec "$SCRIPT_DIR/savio_train_full_graph.sh" "$@"
+REPO_ROOT_FOR_WRAPPER="${REPO_ROOT:-/global/home/users/$USER/c242_cafa5}"
+BASE_SCRIPT="${BASE_SCRIPT:-$REPO_ROOT_FOR_WRAPPER/scripts/savio_train_full_graph.sh}"
+
+if [[ ! -f "$BASE_SCRIPT" ]]; then
+  echo "Base training script not found: $BASE_SCRIPT" >&2
+  echo "Set REPO_ROOT or BASE_SCRIPT to the checked-out repo on Savio before sbatch." >&2
+  exit 1
+fi
+
+exec "$BASE_SCRIPT" "$@"
