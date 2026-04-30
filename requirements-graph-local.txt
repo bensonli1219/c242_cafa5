@@ -1,0 +1,8 @@
+numpy<2
+pyarrow
+torch
+torch_geometric
+dgl<2
+packaging
+psutil
+tqdm
