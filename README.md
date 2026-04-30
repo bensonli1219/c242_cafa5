@@ -16,9 +16,14 @@ This repo contains the CAFA5 AlphaFold download pipeline, supporting tests, and 
 - `build_structure_cache.py`: CLI wrapper for per-fragment DSSP/SASA caches
 - `alphafold_downloader.py`: smaller standalone AlphaFold downloader demo
 - `tests/`: unit tests for the pipeline
-- `docs/`: project documents
+- `docs/planning/`: experiment plans and implementation checklists
+- `docs/reports/`: final reports and experiment summaries
+- `docs/presentations/`: presentation deck and speaking scripts
+- `docs/progress_reports/`: historical checkpoint PDFs
+- `notebooks/reports/`: report notebooks
+- `figures/`: report and presentation figures
 - `data/`: local datasets and downloaded structures
-- `outputs/`: generated manifests and smoke/full pipeline runs
+- `output/` and `outputs/`: generated manifests, caches, notebooks, and smoke/full pipeline runs
 
 ## Main command
 
@@ -171,3 +176,7 @@ On a local machine without those binaries, `build_structure_cache.py` can still 
 ```bash
 ./.venv/bin/python -m unittest discover -s tests -v
 ```
+
+## Repository Hygiene
+
+Generated graph caches, training checkpoints, run logs, notebook checkpoints, and local datasets are ignored by Git. Keep reproducible code, tests, reports, and lightweight figures in the repository; regenerate large experiment artifacts from the scripts when needed.

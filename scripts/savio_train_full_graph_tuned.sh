@@ -19,9 +19,9 @@
 set -euo pipefail
 
 export FRAMEWORK="${FRAMEWORK:-pyg}"
-export ASPECTS="${ASPECTS:-BPO CCO MFO}"
+export ASPECTS="${ASPECTS:-CCO MFO}"
 export MIN_TERM_FREQUENCY="${MIN_TERM_FREQUENCY:-20}"
-export EPOCHS="${EPOCHS:-8}"
+export EPOCHS="${EPOCHS:-5}"
 export BATCH_SIZE="${BATCH_SIZE:-8}"
 export NUM_WORKERS="${NUM_WORKERS:-2}"
 export HIDDEN_DIM="${HIDDEN_DIM:-256}"

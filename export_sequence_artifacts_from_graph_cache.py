@@ -180,6 +180,47 @@ def copy_text_file(src: Path, dst: Path, overwrite: bool = False) -> str:
     return "written"
 
 
+def load_vocab_terms_for_frequency(
+    graph_vocab_dir: Path,
+    aspect: str,
+    min_term_frequency: int,
+) -> dict[str, Any] | None:
+    term_counts_path = graph_vocab_dir.parent / "term_counts.json"
+    if not term_counts_path.exists():
+        return None
+    term_counts = load_json(term_counts_path)
+    aspect_counts = term_counts.get(aspect)
+    if not isinstance(aspect_counts, dict):
+        return None
+    terms = sorted(
+        term
+        for term, count in aspect_counts.items()
+        if int(count) >= int(min_term_frequency)
+    )
+    return {
+        "aspect": aspect,
+        "min_term_frequency": int(min_term_frequency),
+        "terms": terms,
+    }
+
+
+def write_matched_vocab(
+    graph_vocab_dir: Path,
+    aspect: str,
+    dst: Path,
+    min_term_frequency: int,
+    overwrite: bool = False,
+) -> str:
+    filtered_vocab = load_vocab_terms_for_frequency(
+        graph_vocab_dir=graph_vocab_dir,
+        aspect=aspect,
+        min_term_frequency=min_term_frequency,
+    )
+    if filtered_vocab is not None:
+        return write_json_artifact(dst, filtered_vocab, overwrite=overwrite)
+    return copy_text_file(graph_vocab_dir / f"{aspect}.json", dst, overwrite=overwrite)
+
+
 def write_json_artifact(path: Path, payload: Any, overwrite: bool = False) -> str:
     existed = path.exists()
     if path.exists() and not overwrite:
@@ -359,9 +400,14 @@ def mirror_graph_splits(
             result = copy_text_file(src_dir / name, dst_dir / name, overwrite=overwrite)
             copied_files += int(result == "written")
             skipped_files += int(result == "skipped")
-        vocab_src = graph_vocab_dir / f"{aspect}.json"
         vocab_dst = dst_dir / "vocab.json"
-        result = copy_text_file(vocab_src, vocab_dst, overwrite=overwrite)
+        result = write_matched_vocab(
+            graph_vocab_dir=graph_vocab_dir,
+            aspect=aspect,
+            dst=vocab_dst,
+            min_term_frequency=min_term_frequency,
+            overwrite=overwrite,
+        )
         copied_files += int(result == "written")
         skipped_files += int(result == "skipped")
         matched_summary["aspects"][aspect] = {"source": str(src_dir.resolve())}

@@ -1,0 +1,7 @@
+numpy<2
+pyarrow
+torch_geometric==2.7.0
+dgl<2
+packaging
+psutil
+tqdm

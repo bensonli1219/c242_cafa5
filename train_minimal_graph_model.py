@@ -117,11 +117,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--hidden-dim", type=positive_int, default=128)
     parser.add_argument("--dropout", type=positive_float, default=0.2)
+    parser.add_argument("--model-head", choices=["flat_linear", "label_dot"], default="flat_linear")
     parser.add_argument("--lr", type=positive_float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--loss-function", choices=["bce", "weighted_bce"], default="bce")
+    parser.add_argument("--loss-function", choices=["bce", "weighted_bce", "focal_bce"], default="bce")
     parser.add_argument("--pos-weight-power", type=positive_float, default=1.0)
     parser.add_argument("--max-pos-weight", type=positive_float, default=None)
+    parser.add_argument("--focal-gamma", type=non_negative_float, default=2.0)
+    parser.add_argument("--focal-alpha", type=probability_float, default=0.25)
+    parser.add_argument("--logit-adjustment", choices=["none", "train_prior"], default="none")
+    parser.add_argument("--logit-adjustment-strength", type=non_negative_float, default=1.0)
+    parser.add_argument("--logit-temperature", type=positive_float, default=1.0)
+    parser.add_argument("--go-obo-file", type=Path, default=None)
+    parser.add_argument(
+        "--label-ontology-reg-weight",
+        type=non_negative_float,
+        default=0.0,
+        help="Optional L2 regularization weight that pulls parent/child GO label embeddings together.",
+    )
     parser.add_argument("--metric-threshold", type=probability_float, default=0.5)
     parser.add_argument("--fmax-threshold-step", type=positive_float, default=0.01)
     parser.add_argument(
@@ -144,6 +157,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--disable-esm2", action="store_true")
     parser.add_argument("--disable-dssp", action="store_true")
     parser.add_argument("--disable-sasa", action="store_true")
+    parser.add_argument(
+        "--normalize-features",
+        action="store_true",
+        help="Scale raw structural node, edge, and graph features before training.",
+    )
     return parser.parse_args(argv)
 
 
@@ -336,6 +354,138 @@ def multilabel_metrics_from_logits(
     return metrics
 
 
+class StreamingMultilabelMetrics:
+    def __init__(self, threshold: float = 0.5, fmax_threshold_step: float = 0.01) -> None:
+        self.threshold = float(threshold)
+        self.fmax_threshold_step = float(fmax_threshold_step)
+        self.fmax_thresholds = _threshold_values(fmax_threshold_step)
+        self.true_positive = 0.0
+        self.false_positive = 0.0
+        self.false_negative = 0.0
+        self.true_positive_by_label = None
+        self.false_positive_by_label = None
+        self.false_negative_by_label = None
+        self.positive_by_label = None
+        self.fmax_true_positive = [0.0 for _ in self.fmax_thresholds]
+        self.fmax_false_positive = [0.0 for _ in self.fmax_thresholds]
+        self.fmax_false_negative = [0.0 for _ in self.fmax_thresholds]
+
+    def update(self, logits: Any, labels: Any) -> None:
+        torch_module = require_torch()
+        with torch_module.no_grad():
+            scores = torch_module.sigmoid(logits.detach()).cpu()
+            targets = labels.detach().cpu() >= 0.5
+            predictions = scores >= self.threshold
+            inverse_targets = torch_module.logical_not(targets)
+            inverse_predictions = torch_module.logical_not(predictions)
+
+            true_positive_by_label = torch_module.logical_and(predictions, targets).sum(dim=0).float()
+            false_positive_by_label = torch_module.logical_and(predictions, inverse_targets).sum(dim=0).float()
+            false_negative_by_label = torch_module.logical_and(inverse_predictions, targets).sum(dim=0).float()
+            positive_by_label = targets.sum(dim=0).float()
+
+            self.true_positive += float(true_positive_by_label.sum().item())
+            self.false_positive += float(false_positive_by_label.sum().item())
+            self.false_negative += float(false_negative_by_label.sum().item())
+
+            if self.true_positive_by_label is None:
+                self.true_positive_by_label = true_positive_by_label
+                self.false_positive_by_label = false_positive_by_label
+                self.false_negative_by_label = false_negative_by_label
+                self.positive_by_label = positive_by_label
+            else:
+                self.true_positive_by_label += true_positive_by_label
+                self.false_positive_by_label += false_positive_by_label
+                self.false_negative_by_label += false_negative_by_label
+                self.positive_by_label += positive_by_label
+
+            for index, threshold in enumerate(self.fmax_thresholds):
+                threshold_predictions = scores >= threshold
+                inverse_threshold_predictions = torch_module.logical_not(threshold_predictions)
+                self.fmax_true_positive[index] += float(
+                    torch_module.logical_and(threshold_predictions, targets).sum().item()
+                )
+                self.fmax_false_positive[index] += float(
+                    torch_module.logical_and(threshold_predictions, inverse_targets).sum().item()
+                )
+                self.fmax_false_negative[index] += float(
+                    torch_module.logical_and(inverse_threshold_predictions, targets).sum().item()
+                )
+
+    def compute(self) -> dict[str, float]:
+        torch_module = require_torch()
+        if self.true_positive_by_label is None:
+            return empty_metrics(
+                metric_threshold=self.threshold,
+                fmax_threshold_step=self.fmax_threshold_step,
+            )
+
+        micro_precision = _safe_ratio(self.true_positive, self.true_positive + self.false_positive)
+        micro_recall = _safe_ratio(self.true_positive, self.true_positive + self.false_negative)
+        micro_f1 = _safe_ratio(2 * micro_precision * micro_recall, micro_precision + micro_recall)
+
+        macro_precision_by_label = torch_module.where(
+            (self.true_positive_by_label + self.false_positive_by_label) > 0,
+            self.true_positive_by_label / (self.true_positive_by_label + self.false_positive_by_label),
+            torch_module.zeros_like(self.true_positive_by_label),
+        )
+        macro_recall_by_label = torch_module.where(
+            (self.true_positive_by_label + self.false_negative_by_label) > 0,
+            self.true_positive_by_label / (self.true_positive_by_label + self.false_negative_by_label),
+            torch_module.zeros_like(self.true_positive_by_label),
+        )
+        macro_f1_by_label = torch_module.where(
+            ((2 * self.true_positive_by_label) + self.false_positive_by_label + self.false_negative_by_label) > 0,
+            (2 * self.true_positive_by_label)
+            / ((2 * self.true_positive_by_label) + self.false_positive_by_label + self.false_negative_by_label),
+            torch_module.zeros_like(self.true_positive_by_label),
+        )
+        labels_with_positive = self.positive_by_label > 0
+
+        best_fmax = {
+            "fmax": 0.0,
+            "fmax_threshold": 0.0,
+            "fmax_precision": 0.0,
+            "fmax_recall": 0.0,
+        }
+        for threshold, true_positive, false_positive, false_negative in zip(
+            self.fmax_thresholds,
+            self.fmax_true_positive,
+            self.fmax_false_positive,
+            self.fmax_false_negative,
+        ):
+            precision = _safe_ratio(true_positive, true_positive + false_positive)
+            recall = _safe_ratio(true_positive, true_positive + false_negative)
+            f1 = _safe_ratio(2 * precision * recall, precision + recall)
+            if f1 > best_fmax["fmax"]:
+                best_fmax = {
+                    "fmax": f1,
+                    "fmax_threshold": float(threshold),
+                    "fmax_precision": precision,
+                    "fmax_recall": recall,
+                }
+
+        metrics = {
+            "micro_precision": micro_precision,
+            "micro_recall": micro_recall,
+            "micro_f1": micro_f1,
+            "macro_precision": (
+                float(macro_precision_by_label.mean().item()) if macro_precision_by_label.numel() else 0.0
+            ),
+            "macro_recall": float(macro_recall_by_label.mean().item()) if macro_recall_by_label.numel() else 0.0,
+            "macro_f1": float(macro_f1_by_label.mean().item()) if macro_f1_by_label.numel() else 0.0,
+            "macro_f1_positive_labels": (
+                float(macro_f1_by_label[labels_with_positive].mean().item()) if labels_with_positive.any().item() else 0.0
+            ),
+            "label_count": float(self.true_positive_by_label.numel()),
+            "label_count_with_positive": float(labels_with_positive.sum().item()),
+            "metric_threshold": self.threshold,
+            "fmax_threshold_step": self.fmax_threshold_step,
+        }
+        metrics.update(best_fmax)
+        return metrics
+
+
 def empty_metrics(metric_threshold: float = 0.5, fmax_threshold_step: float = 0.01) -> dict[str, float]:
     return {
         "loss": 0.0,
@@ -419,6 +569,236 @@ def summarize_pos_weight_tensor(pos_weight: Any) -> dict[str, float]:
     }
 
 
+def build_label_prior_tensor(dataset: Any):
+    torch_module = require_torch()
+    vocab = getattr(dataset, "vocab", None)
+    term_to_index = getattr(dataset, "term_to_index", None)
+    aspect = getattr(dataset, "aspect", None)
+    entries = getattr(dataset, "entries", None)
+    if vocab is None or term_to_index is None or aspect is None or entries is None:
+        raise ValueError("Dataset does not expose the attributes required to build label priors.")
+
+    positive_counts = torch_module.zeros(len(vocab), dtype=torch_module.float32)
+    for entry in entries:
+        labels = set((entry.get("labels") or {}).get(aspect, []))
+        for term in labels:
+            index = term_to_index.get(term)
+            if index is not None:
+                positive_counts[index] += 1.0
+
+    total_graphs = max(1.0, float(len(entries)))
+    priors = positive_counts / total_graphs
+    return torch_module.clamp(priors, min=1e-6, max=1.0 - 1e-6)
+
+
+def summarize_tensor_values(values: Any) -> dict[str, float]:
+    if int(values.numel()) == 0:
+        return {
+            "count": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "mean": 0.0,
+        }
+    return {
+        "count": float(values.numel()),
+        "min": float(values.min().item()),
+        "max": float(values.max().item()),
+        "mean": float(values.mean().item()),
+    }
+
+
+def load_go_parent_pairs(obo_path: Path, vocab: list[str]) -> list[tuple[int, int]]:
+    vocab_index = {term: index for index, term in enumerate(vocab)}
+    if not vocab_index:
+        return []
+
+    parent_pairs: set[tuple[int, int]] = set()
+    current_term_id: str | None = None
+    current_parent_terms: set[str] = set()
+    current_is_obsolete = False
+    inside_term = False
+
+    def flush_term() -> None:
+        nonlocal current_term_id, current_parent_terms, current_is_obsolete
+        if current_term_id and not current_is_obsolete and current_term_id in vocab_index:
+            child_index = vocab_index[current_term_id]
+            for parent_term in current_parent_terms:
+                parent_index = vocab_index.get(parent_term)
+                if parent_index is not None and parent_index != child_index:
+                    parent_pairs.add((child_index, parent_index))
+        current_term_id = None
+        current_parent_terms = set()
+        current_is_obsolete = False
+
+    with obo_path.open("r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if line == "[Term]":
+                if inside_term:
+                    flush_term()
+                inside_term = True
+                continue
+            if line.startswith("[") and line != "[Term]":
+                if inside_term:
+                    flush_term()
+                inside_term = False
+                continue
+            if not inside_term:
+                continue
+            if not line:
+                flush_term()
+                inside_term = False
+                continue
+            if line.startswith("id: "):
+                current_term_id = line.split("id: ", 1)[1].strip()
+                continue
+            if line.startswith("is_a: "):
+                parent_term = line.split("is_a: ", 1)[1].split()[0].strip()
+                if parent_term:
+                    current_parent_terms.add(parent_term)
+                continue
+            if line.startswith("is_obsolete: ") and line.endswith("true"):
+                current_is_obsolete = True
+        if inside_term:
+            flush_term()
+
+    return sorted(parent_pairs)
+
+
+def build_label_ontology_regularizer(
+    args: argparse.Namespace,
+    train_dataset: Any,
+    device: Any,
+) -> dict[str, Any]:
+    config: dict[str, Any] = {
+        "enabled": False,
+        "weight": float(args.label_ontology_reg_weight),
+        "go_obo_file": str(args.go_obo_file.resolve()) if args.go_obo_file else None,
+    }
+    if args.label_ontology_reg_weight <= 0:
+        return config
+    if args.model_head != "label_dot":
+        raise ValueError("label ontology regularization requires --model-head label_dot")
+    if args.go_obo_file is None:
+        raise ValueError("label ontology regularization requires --go-obo-file")
+    if not args.go_obo_file.exists():
+        raise FileNotFoundError(f"GO OBO file not found: {args.go_obo_file}")
+
+    torch_module = require_torch()
+    vocab = getattr(train_dataset, "vocab", None)
+    if vocab is None:
+        raise ValueError("Dataset does not expose vocab required for label ontology regularization.")
+    parent_pairs = load_go_parent_pairs(args.go_obo_file, list(vocab))
+    if not parent_pairs:
+        config.update(
+            {
+                "enabled": False,
+                "relation_count": 0,
+            }
+        )
+        return config
+
+    config.update(
+        {
+            "enabled": True,
+            "relation_count": len(parent_pairs),
+            "regularizer": torch_module.tensor(parent_pairs, dtype=torch_module.long, device=device),
+        }
+    )
+    return config
+
+
+def compute_label_ontology_regularization(
+    model: Any,
+    label_ontology_config: dict[str, Any] | None,
+):
+    torch_module = require_torch()
+    if not label_ontology_config or not label_ontology_config.get("enabled"):
+        return torch_module.tensor(0.0, device=next(model.parameters()).device)
+    if getattr(model, "label_embeddings", None) is None:
+        raise ValueError("label ontology regularization requires a model with label embeddings.")
+    parent_pairs = label_ontology_config.get("regularizer")
+    if parent_pairs is None or int(parent_pairs.numel()) == 0:
+        return torch_module.tensor(0.0, device=model.label_embeddings.weight.device)
+
+    child_embeddings = model.label_embeddings.weight[parent_pairs[:, 0]]
+    parent_embeddings = model.label_embeddings.weight[parent_pairs[:, 1]]
+    penalty = (child_embeddings - parent_embeddings).pow(2).mean()
+    return penalty * float(label_ontology_config["weight"])
+
+
+def build_logit_transform(
+    args: argparse.Namespace,
+    train_dataset: Any,
+    device: Any,
+) -> dict[str, Any]:
+    config: dict[str, Any] = {
+        "logit_adjustment": args.logit_adjustment,
+        "logit_adjustment_strength": args.logit_adjustment_strength,
+        "logit_temperature": args.logit_temperature,
+        "enabled": False,
+    }
+    if args.logit_adjustment == "none" and args.logit_temperature == 1.0:
+        return config
+
+    torch_module = require_torch()
+    transform = {
+        "adjustment_bias": None,
+        "temperature": float(args.logit_temperature),
+    }
+    if args.logit_adjustment == "train_prior":
+        priors = build_label_prior_tensor(train_dataset)
+        adjustment_bias = torch_module.log(priors / (1.0 - priors)) * float(args.logit_adjustment_strength)
+        transform["adjustment_bias"] = adjustment_bias.to(device)
+        config.update(
+            {
+                "enabled": True,
+                "label_prior_summary": summarize_tensor_values(priors),
+                "adjustment_bias_summary": summarize_tensor_values(adjustment_bias),
+            }
+        )
+    elif args.logit_temperature != 1.0:
+        config["enabled"] = True
+
+    config["transform"] = transform
+    return config
+
+
+def apply_logit_transform(logits: Any, logit_transform_config: dict[str, Any] | None):
+    if not logit_transform_config or not logit_transform_config.get("enabled"):
+        return logits
+    transform = logit_transform_config.get("transform") or {}
+    adjusted_logits = logits
+    adjustment_bias = transform.get("adjustment_bias")
+    if adjustment_bias is not None:
+        adjusted_logits = adjusted_logits + adjustment_bias.view(1, -1)
+    temperature = float(transform.get("temperature", 1.0))
+    if temperature != 1.0:
+        adjusted_logits = adjusted_logits / temperature
+    return adjusted_logits
+
+
+class FocalBCEWithLogitsLoss(NNModuleBase):
+    def __init__(self, gamma: float = 2.0, alpha: float = 0.25) -> None:
+        require_torch()
+        super().__init__()
+        self.gamma = float(gamma)
+        self.alpha = float(alpha)
+
+    def forward(self, logits: Any, targets: Any):
+        torch_module = require_torch()
+        bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+        probabilities = torch_module.sigmoid(logits)
+        pt = torch_module.where(targets >= 0.5, probabilities, 1.0 - probabilities)
+        alpha_factor = torch_module.where(
+            targets >= 0.5,
+            torch_module.full_like(targets, self.alpha),
+            torch_module.full_like(targets, 1.0 - self.alpha),
+        )
+        modulation = torch_module.pow(torch_module.clamp(1.0 - pt, min=0.0), self.gamma)
+        return (alpha_factor * modulation * bce).mean()
+
+
 def build_loss_function(
     args: argparse.Namespace,
     train_dataset: Any,
@@ -444,6 +824,14 @@ def build_loss_function(
             }
         )
         return torch_module.nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device)), config
+    if args.loss_function == "focal_bce":
+        config.update(
+            {
+                "focal_gamma": args.focal_gamma,
+                "focal_alpha": args.focal_alpha,
+            }
+        )
+        return FocalBCEWithLogitsLoss(gamma=args.focal_gamma, alpha=args.focal_alpha), config
     raise ValueError(f"Unknown loss function: {args.loss_function}")
 
 
@@ -475,14 +863,31 @@ def build_lr_scheduler(
 
 
 class MinimalPygClassifier(NNModuleBase):
-    def __init__(self, input_dim: int, graph_feat_dim: int, hidden_dim: int, output_dim: int, dropout: float) -> None:
+    def __init__(
+        self,
+        input_dim: int,
+        graph_feat_dim: int,
+        hidden_dim: int,
+        output_dim: int,
+        dropout: float,
+        model_head: str = "flat_linear",
+    ) -> None:
         GCN, _, base_nn = require_pyg_model_parts()
         super().__init__()
         self.input_proj = base_nn.Linear(input_dim, hidden_dim)
         self.conv1 = GCN(hidden_dim, hidden_dim)
         self.conv2 = GCN(hidden_dim, hidden_dim)
         self.graph_mlp = base_nn.Linear(graph_feat_dim, hidden_dim)
-        self.classifier = base_nn.Linear(hidden_dim * 2, output_dim)
+        self.model_head = model_head
+        fused_dim = hidden_dim * 2
+        if model_head == "flat_linear":
+            self.classifier = base_nn.Linear(fused_dim, output_dim)
+            self.label_embeddings = None
+        elif model_head == "label_dot":
+            self.classifier = None
+            self.label_embeddings = base_nn.Embedding(output_dim, fused_dim)
+        else:
+            raise ValueError(f"Unknown model head: {model_head}")
         self.dropout = float(dropout)
 
     def forward(self, batch: Any):
@@ -494,18 +899,38 @@ class MinimalPygClassifier(NNModuleBase):
         pooled = pool_fn(x, batch.batch)
         graph_feat = batch.graph_feat.float().view(pooled.shape[0], -1)
         fused = torch.cat([pooled, F.relu(self.graph_mlp(graph_feat))], dim=-1)
-        return self.classifier(F.dropout(fused, p=self.dropout, training=self.training))
+        fused = F.dropout(fused, p=self.dropout, training=self.training)
+        if self.model_head == "flat_linear":
+            return self.classifier(fused)
+        return fused @ self.label_embeddings.weight.t()
 
 
 class MinimalDglClassifier(NNModuleBase):
-    def __init__(self, input_dim: int, graph_feat_dim: int, hidden_dim: int, output_dim: int, dropout: float) -> None:
+    def __init__(
+        self,
+        input_dim: int,
+        graph_feat_dim: int,
+        hidden_dim: int,
+        output_dim: int,
+        dropout: float,
+        model_head: str = "flat_linear",
+    ) -> None:
         GraphConvLayer, base_nn = require_dgl_model_parts()
         super().__init__()
         self.input_proj = base_nn.Linear(input_dim, hidden_dim)
         self.conv1 = GraphConvLayer(hidden_dim, hidden_dim, allow_zero_in_degree=True)
         self.conv2 = GraphConvLayer(hidden_dim, hidden_dim, allow_zero_in_degree=True)
         self.graph_mlp = base_nn.Linear(graph_feat_dim, hidden_dim)
-        self.classifier = base_nn.Linear(hidden_dim * 2, output_dim)
+        self.model_head = model_head
+        fused_dim = hidden_dim * 2
+        if model_head == "flat_linear":
+            self.classifier = base_nn.Linear(fused_dim, output_dim)
+            self.label_embeddings = None
+        elif model_head == "label_dot":
+            self.classifier = None
+            self.label_embeddings = base_nn.Embedding(output_dim, fused_dim)
+        else:
+            raise ValueError(f"Unknown model head: {model_head}")
         self.dropout = float(dropout)
 
     def forward(self, batch: Any):
@@ -519,7 +944,10 @@ class MinimalDglClassifier(NNModuleBase):
             pooled = dgl_module.mean_nodes(batch, "_hidden")
         graph_feat = batch.graph_feat.float().view(pooled.shape[0], -1)
         fused = torch.cat([pooled, F.relu(self.graph_mlp(graph_feat))], dim=-1)
-        return self.classifier(F.dropout(fused, p=self.dropout, training=self.training))
+        fused = F.dropout(fused, p=self.dropout, training=self.training)
+        if self.model_head == "flat_linear":
+            return self.classifier(fused)
+        return fused @ self.label_embeddings.weight.t()
 
 
 def move_batch_to_device(batch: Any, framework: str, device: Any):
@@ -582,6 +1010,8 @@ def run_epoch(
     loss_fn: Any | None = None,
     metric_threshold: float = 0.5,
     fmax_threshold_step: float = 0.01,
+    logit_transform_config: dict[str, Any] | None = None,
+    label_ontology_config: dict[str, Any] | None = None,
     epoch: int | None = None,
     split_name: str = "split",
     progress_mode: str = "auto",
@@ -594,9 +1024,13 @@ def run_epoch(
 
     model.train(is_training)
     total_loss = 0.0
+    total_base_loss = 0.0
+    total_regularization_loss = 0.0
     total_graphs = 0
-    logits_parts = []
-    label_parts = []
+    metric_accumulator = StreamingMultilabelMetrics(
+        threshold=metric_threshold,
+        fmax_threshold_step=fmax_threshold_step,
+    )
     total_batches = loader_batch_count(loader)
     epoch_label = f"epoch={epoch} {split_name}" if epoch is not None else split_name
     batch_iterable, active_progress_mode = progress_iterable(
@@ -613,15 +1047,21 @@ def run_epoch(
             batch = move_batch_to_device(batch, framework=framework, device=device)
             labels = extract_labels(batch, framework=framework)
             logits = model(batch)
-            loss = loss_fn(logits, labels)
+            base_loss = loss_fn(logits, labels)
+            regularization_loss = compute_label_ontology_regularization(model, label_ontology_config) if is_training else None
+            loss = base_loss if regularization_loss is None else base_loss + regularization_loss
+            metric_logits = apply_logit_transform(logits, logit_transform_config)
             if is_training:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
-            total_loss += float(loss.detach().cpu().item()) * batch_graph_count(batch, framework=framework)
-            total_graphs += batch_graph_count(batch, framework=framework)
-            logits_parts.append(logits.detach().cpu())
-            label_parts.append(labels.detach().cpu())
+            graph_count = batch_graph_count(batch, framework=framework)
+            total_loss += float(loss.detach().cpu().item()) * graph_count
+            total_base_loss += float(base_loss.detach().cpu().item()) * graph_count
+            if regularization_loss is not None:
+                total_regularization_loss += float(regularization_loss.detach().cpu().item()) * graph_count
+            total_graphs += graph_count
+            metric_accumulator.update(metric_logits, labels)
             if active_progress_mode == "log" and (
                 batch_index == 1 or batch_index % progress_every == 0 or batch_index == total_batches
             ):
@@ -643,25 +1083,17 @@ def run_epoch(
     synchronize_device(device)
 
     mean_loss = total_loss / total_graphs if total_graphs else 0.0
-    if logits_parts:
-        all_logits = torch_module.cat(logits_parts, dim=0)
-        all_labels = torch_module.cat(label_parts, dim=0)
-        metrics = multilabel_metrics_from_logits(
-            all_logits,
-            all_labels,
-            threshold=metric_threshold,
-            fmax_threshold_step=fmax_threshold_step,
-        )
-    else:
-        metrics = empty_metrics(metric_threshold=metric_threshold, fmax_threshold_step=fmax_threshold_step)
+    metrics = metric_accumulator.compute()
     metrics.update({
         "loss": mean_loss,
+        "base_loss": total_base_loss / total_graphs if total_graphs else 0.0,
+        "regularization_loss": total_regularization_loss / total_graphs if total_graphs else 0.0,
         "graphs": float(total_graphs),
     })
     return metrics
 
 
-def build_model(framework: str, output_dim: int, hidden_dim: int, dropout: float):
+def build_model(framework: str, output_dim: int, hidden_dim: int, dropout: float, model_head: str):
     if framework == "pyg":
         return MinimalPygClassifier(
             input_dim=graphs.NODE_FEATURE_DIM,
@@ -669,6 +1101,7 @@ def build_model(framework: str, output_dim: int, hidden_dim: int, dropout: float
             hidden_dim=hidden_dim,
             output_dim=output_dim,
             dropout=dropout,
+            model_head=model_head,
         )
     if framework == "dgl":
         return MinimalDglClassifier(
@@ -677,6 +1110,7 @@ def build_model(framework: str, output_dim: int, hidden_dim: int, dropout: float
             hidden_dim=hidden_dim,
             output_dim=output_dim,
             dropout=dropout,
+            model_head=model_head,
         )
     raise ValueError(f"Unknown framework: {framework}")
 
@@ -701,6 +1135,7 @@ def build_training_objects(args: argparse.Namespace) -> tuple[dict[str, Any], An
         use_esm2=not args.disable_esm2,
         use_dssp=not args.disable_dssp,
         use_sasa=not args.disable_sasa,
+        normalize_features=args.normalize_features,
     )
     if args.framework == "pyg":
         loaders = {
@@ -733,6 +1168,7 @@ def build_training_objects(args: argparse.Namespace) -> tuple[dict[str, Any], An
         output_dim=output_dim,
         hidden_dim=args.hidden_dim,
         dropout=args.dropout,
+        model_head=args.model_head,
     )
     return loaders, model, datasets
 
@@ -752,6 +1188,8 @@ def main(argv: list[str] | None = None) -> int:
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loss_fn, loss_config = build_loss_function(args, datasets["train"], device=device)
+    logit_transform_config = build_logit_transform(args, datasets["train"], device=device)
+    label_ontology_config = build_label_ontology_regularizer(args, datasets["train"], device=device)
     scheduler, scheduler_config = build_lr_scheduler(args, optimizer)
 
     history = []
@@ -778,6 +1216,8 @@ def main(argv: list[str] | None = None) -> int:
             loss_fn=loss_fn,
             metric_threshold=args.metric_threshold,
             fmax_threshold_step=args.fmax_threshold_step,
+            logit_transform_config=logit_transform_config,
+            label_ontology_config=label_ontology_config,
             epoch=epoch,
             split_name=f"{args.aspect} train",
             progress_mode=args.progress_mode,
@@ -792,6 +1232,8 @@ def main(argv: list[str] | None = None) -> int:
             loss_fn=loss_fn,
             metric_threshold=args.metric_threshold,
             fmax_threshold_step=args.fmax_threshold_step,
+            logit_transform_config=logit_transform_config,
+            label_ontology_config=label_ontology_config,
             epoch=epoch,
             split_name=f"{args.aspect} val",
             progress_mode=args.progress_mode,
@@ -809,6 +1251,8 @@ def main(argv: list[str] | None = None) -> int:
             loss_fn=loss_fn,
             metric_threshold=args.metric_threshold,
             fmax_threshold_step=args.fmax_threshold_step,
+            logit_transform_config=logit_transform_config,
+            label_ontology_config=label_ontology_config,
             epoch=epoch,
             split_name=f"{args.aspect} test",
             progress_mode=args.progress_mode,
@@ -883,6 +1327,9 @@ def main(argv: list[str] | None = None) -> int:
                     "val_fmax_threshold": val_metrics["fmax_threshold"],
                     "checkpoint_metric_name": args.checkpoint_metric,
                     "checkpoint_metric_value": checkpoint_metric_value,
+                    "logit_transform_config": {
+                        key: value for key, value in logit_transform_config.items() if key != "transform"
+                    },
                     "args": vars(args),
                 },
                 best_checkpoint_path,
@@ -905,10 +1352,18 @@ def main(argv: list[str] | None = None) -> int:
             "batch_size": args.batch_size,
             "hidden_dim": args.hidden_dim,
             "dropout": args.dropout,
+            "model_head": args.model_head,
             "lr": args.lr,
             "weight_decay": args.weight_decay,
             "loss_function": args.loss_function,
             "loss_config": loss_config,
+            "logit_transform_config": {
+                key: value for key, value in logit_transform_config.items() if key != "transform"
+            },
+            "label_ontology_config": {
+                key: value for key, value in label_ontology_config.items() if key != "regularizer"
+            },
+            "normalize_features": args.normalize_features,
             "metric_threshold": args.metric_threshold,
             "fmax_threshold_step": args.fmax_threshold_step,
             "checkpoint_metric": args.checkpoint_metric,

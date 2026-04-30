@@ -1,5 +1,5 @@
 pyarrow
 torch
-transformers
+transformers<5
 safetensors
 mdtraj

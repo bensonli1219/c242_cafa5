@@ -19,21 +19,29 @@ REPO_ROOT="${REPO_ROOT:-/global/home/users/$USER/c242_cafa5}"
 RUN_ROOT="${RUN_ROOT:-/global/scratch/users/$USER/cafa5_outputs}"
 GRAPH_CACHE_DIR="${GRAPH_CACHE_DIR:-$RUN_ROOT/graph_cache}"
 SPLIT_DIR="${SPLIT_DIR:-$GRAPH_CACHE_DIR/splits}"
-PYTHON_BIN="${PYTHON_BIN:-/global/home/users/$USER/venvs/cafa5-notebook/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-/global/home/users/$USER/venvs/cafa5-pytorch-2.3.1/bin/python}"
+PYTORCH_MODULE="${PYTORCH_MODULE:-ml/pytorch/2.3.1-py3.11.7}"
 
 FRAMEWORK="${FRAMEWORK:-pyg}"
-ASPECTS="${ASPECTS:-BPO CCO MFO}"
+ASPECTS="${ASPECTS:-CCO MFO}"
 MIN_TERM_FREQUENCY="${MIN_TERM_FREQUENCY:-20}"
 EPOCHS="${EPOCHS:-5}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 NUM_WORKERS="${NUM_WORKERS:-2}"
 HIDDEN_DIM="${HIDDEN_DIM:-128}"
 DROPOUT="${DROPOUT:-0.2}"
+MODEL_HEAD="${MODEL_HEAD:-flat_linear}"
 LR="${LR:-0.001}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.0001}"
 LOSS_FUNCTION="${LOSS_FUNCTION:-bce}"
 POS_WEIGHT_POWER="${POS_WEIGHT_POWER:-1.0}"
 MAX_POS_WEIGHT="${MAX_POS_WEIGHT:-}"
+FOCAL_GAMMA="${FOCAL_GAMMA:-2.0}"
+FOCAL_ALPHA="${FOCAL_ALPHA:-0.25}"
+LOGIT_ADJUSTMENT="${LOGIT_ADJUSTMENT:-none}"
+LOGIT_ADJUSTMENT_STRENGTH="${LOGIT_ADJUSTMENT_STRENGTH:-1.0}"
+LOGIT_TEMPERATURE="${LOGIT_TEMPERATURE:-1.0}"
+LABEL_ONTOLOGY_REG_WEIGHT="${LABEL_ONTOLOGY_REG_WEIGHT:-0.0}"
 METRIC_THRESHOLD="${METRIC_THRESHOLD:-0.5}"
 FMAX_THRESHOLD_STEP="${FMAX_THRESHOLD_STEP:-0.01}"
 CHECKPOINT_METRIC="${CHECKPOINT_METRIC:-val_loss}"
@@ -50,6 +58,7 @@ SEED="${SEED:-2026}"
 USE_ESM2="${USE_ESM2:-1}"
 USE_DSSP="${USE_DSSP:-1}"
 USE_SASA="${USE_SASA:-1}"
+NORMALIZE_FEATURES="${NORMALIZE_FEATURES:-0}"
 CONTINUE_ON_FAILURE="${CONTINUE_ON_FAILURE:-0}"
 USE_SRUN="${USE_SRUN:-1}"
 SRUN_CPUS_PER_TASK="${SRUN_CPUS_PER_TASK:-${SLURM_CPUS_PER_TASK:-2}}"
@@ -61,8 +70,14 @@ MAX_PARALLEL="${MAX_PARALLEL:-4}"
 
 EVAL_ROOT="${EVAL_ROOT:-$HOME/cafa5}"
 IA_FILE="${IA_FILE:-$EVAL_ROOT/IA.txt}"
-GO_OBO_FILE="${GO_OBO_FILE:-$EVAL_ROOT/go-basic.obo}"
-GROUND_TRUTH_FILE="${GROUND_TRUTH_FILE:-$EVAL_ROOT/test_terms.tsv}"
+if [[ -z "${GO_OBO_FILE+x}" ]]; then
+  if [[ -f "$EVAL_ROOT/Train/go-basic.obo" ]]; then
+    GO_OBO_FILE="$EVAL_ROOT/Train/go-basic.obo"
+  else
+    GO_OBO_FILE="$EVAL_ROOT/go-basic.obo"
+  fi
+fi
+GROUND_TRUTH_FILE="${GROUND_TRUTH_FILE:-$REPO_ROOT/output/cafa_eval/test_terms.tsv}"
 CAFAEVAL_BIN="${CAFAEVAL_BIN:-cafaeval}"
 REQUIRE_IA_FILE="${REQUIRE_IA_FILE:-1}"
 
@@ -104,6 +119,15 @@ echo "cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-}"
 if [[ -n "${SLURM_JOB_NODELIST:-}" ]] && command -v scontrol >/dev/null 2>&1; then
   echo "allocated_nodes:"
   scontrol show hostnames "$SLURM_JOB_NODELIST"
+fi
+
+if [[ -n "$PYTORCH_MODULE" ]]; then
+  if ! command -v module >/dev/null 2>&1; then
+    source /etc/profile.d/modules.sh
+  fi
+  set +u
+  module load "$PYTORCH_MODULE"
+  set -u
 fi
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
@@ -151,11 +175,17 @@ if [[ ! -f "$SPLIT_DIR/summary.json" ]]; then
   exit 1
 fi
 
+if [[ "$LABEL_ONTOLOGY_REG_WEIGHT" != "0" && ! -f "$GO_OBO_FILE" ]]; then
+  echo "LABEL_ONTOLOGY_REG_WEIGHT requires a valid GO_OBO_FILE, but this path is missing: $GO_OBO_FILE" >&2
+  exit 1
+fi
+
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 export PYTHONUNBUFFERED=1
+export PYTHONNOUSERSITE="${PYTHONNOUSERSITE:-1}"
 
 echo "PYTHON_BIN=$PYTHON_BIN"
 echo "REPO_ROOT=$REPO_ROOT"
@@ -171,11 +201,18 @@ echo "BATCH_SIZE=$BATCH_SIZE"
 echo "NUM_WORKERS=$NUM_WORKERS"
 echo "HIDDEN_DIM=$HIDDEN_DIM"
 echo "DROPOUT=$DROPOUT"
+echo "MODEL_HEAD=$MODEL_HEAD"
 echo "LR=$LR"
 echo "WEIGHT_DECAY=$WEIGHT_DECAY"
 echo "LOSS_FUNCTION=$LOSS_FUNCTION"
 echo "POS_WEIGHT_POWER=$POS_WEIGHT_POWER"
 echo "MAX_POS_WEIGHT=$MAX_POS_WEIGHT"
+echo "FOCAL_GAMMA=$FOCAL_GAMMA"
+echo "FOCAL_ALPHA=$FOCAL_ALPHA"
+echo "LOGIT_ADJUSTMENT=$LOGIT_ADJUSTMENT"
+echo "LOGIT_ADJUSTMENT_STRENGTH=$LOGIT_ADJUSTMENT_STRENGTH"
+echo "LOGIT_TEMPERATURE=$LOGIT_TEMPERATURE"
+echo "LABEL_ONTOLOGY_REG_WEIGHT=$LABEL_ONTOLOGY_REG_WEIGHT"
 echo "METRIC_THRESHOLD=$METRIC_THRESHOLD"
 echo "FMAX_THRESHOLD_STEP=$FMAX_THRESHOLD_STEP"
 echo "CHECKPOINT_METRIC=$CHECKPOINT_METRIC"
@@ -266,9 +303,13 @@ PY
 
 export RUN_DIR REPO_ROOT RUN_ROOT GRAPH_CACHE_DIR SPLIT_DIR PYTHON_BIN FRAMEWORK
 export ASPECTS MIN_TERM_FREQUENCY EPOCHS BATCH_SIZE NUM_WORKERS HIDDEN_DIM
+export MODEL_HEAD
 export DROPOUT LR WEIGHT_DECAY LOSS_FUNCTION POS_WEIGHT_POWER MAX_POS_WEIGHT
+export FOCAL_GAMMA FOCAL_ALPHA
+export LOGIT_ADJUSTMENT LOGIT_ADJUSTMENT_STRENGTH LOGIT_TEMPERATURE
+export LABEL_ONTOLOGY_REG_WEIGHT
 export METRIC_THRESHOLD FMAX_THRESHOLD_STEP CHECKPOINT_METRIC EARLY_STOPPING_PATIENCE EARLY_STOPPING_MIN_DELTA
-export LR_SCHEDULER LR_PLATEAU_FACTOR LR_PLATEAU_PATIENCE MIN_LR PROGRESS_MODE PROGRESS_EVERY DEVICE SEED USE_ESM2 USE_DSSP USE_SASA
+export LR_SCHEDULER LR_PLATEAU_FACTOR LR_PLATEAU_PATIENCE MIN_LR PROGRESS_MODE PROGRESS_EVERY DEVICE SEED USE_ESM2 USE_DSSP USE_SASA NORMALIZE_FEATURES
 export USE_SRUN SRUN_CPUS_PER_TASK REQUESTED_WALLTIME REQUESTED_GPU_TOTAL REQUESTED_GPU_PER_NODE
 export GPU_IDS MAX_PARALLEL EVAL_ROOT IA_FILE GO_OBO_FILE GROUND_TRUTH_FILE CAFAEVAL_BIN
 "$PYTHON_BIN" - <<'PY'
@@ -289,12 +330,19 @@ keys = [
     "BATCH_SIZE",
     "NUM_WORKERS",
     "HIDDEN_DIM",
+    "MODEL_HEAD",
     "DROPOUT",
     "LR",
     "WEIGHT_DECAY",
     "LOSS_FUNCTION",
     "POS_WEIGHT_POWER",
     "MAX_POS_WEIGHT",
+    "FOCAL_GAMMA",
+    "FOCAL_ALPHA",
+    "LOGIT_ADJUSTMENT",
+    "LOGIT_ADJUSTMENT_STRENGTH",
+    "LOGIT_TEMPERATURE",
+    "LABEL_ONTOLOGY_REG_WEIGHT",
     "METRIC_THRESHOLD",
     "FMAX_THRESHOLD_STEP",
     "CHECKPOINT_METRIC",
@@ -311,6 +359,7 @@ keys = [
     "USE_ESM2",
     "USE_DSSP",
     "USE_SASA",
+    "NORMALIZE_FEATURES",
     "USE_SRUN",
     "SRUN_CPUS_PER_TASK",
     "REQUESTED_WALLTIME",
@@ -400,11 +449,18 @@ run_aspect() {
     --batch-size "$BATCH_SIZE"
     --num-workers "$NUM_WORKERS"
     --hidden-dim "$HIDDEN_DIM"
+    --model-head "$MODEL_HEAD"
     --dropout "$DROPOUT"
     --lr "$LR"
     --weight-decay "$WEIGHT_DECAY"
     --loss-function "$LOSS_FUNCTION"
     --pos-weight-power "$POS_WEIGHT_POWER"
+    --focal-gamma "$FOCAL_GAMMA"
+    --focal-alpha "$FOCAL_ALPHA"
+    --logit-adjustment "$LOGIT_ADJUSTMENT"
+    --logit-adjustment-strength "$LOGIT_ADJUSTMENT_STRENGTH"
+    --logit-temperature "$LOGIT_TEMPERATURE"
+    --label-ontology-reg-weight "$LABEL_ONTOLOGY_REG_WEIGHT"
     --metric-threshold "$METRIC_THRESHOLD"
     --fmax-threshold-step "$FMAX_THRESHOLD_STEP"
     --checkpoint-metric "$CHECKPOINT_METRIC"
@@ -430,8 +486,14 @@ run_aspect() {
   if [[ "$USE_SASA" != "1" ]]; then
     cmd+=(--disable-sasa)
   fi
+  if [[ "$NORMALIZE_FEATURES" == "1" ]]; then
+    cmd+=(--normalize-features)
+  fi
   if [[ -n "$MAX_POS_WEIGHT" ]]; then
     cmd+=(--max-pos-weight "$MAX_POS_WEIGHT")
+  fi
+  if [[ -f "$GO_OBO_FILE" ]]; then
+    cmd+=(--go-obo-file "$GO_OBO_FILE")
   fi
 
   {
@@ -491,14 +553,23 @@ payload = {
 if summary_path.exists():
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     history = summary.get("history") or []
+    best_epoch = summary.get("best_epoch")
+    best_epoch_record = None
+    if best_epoch is not None:
+        for record in history:
+            if record.get("epoch") == best_epoch:
+                best_epoch_record = record
+                break
     payload["best_val_loss"] = summary.get("best_val_loss")
     payload["best_checkpoint_metric_name"] = summary.get("checkpoint_metric")
     payload["best_checkpoint_metric"] = summary.get("best_checkpoint_metric")
-    payload["best_epoch"] = summary.get("best_epoch")
+    payload["best_epoch"] = best_epoch
     payload["best_checkpoint_path"] = summary.get("best_checkpoint_path")
     payload["stopped_early"] = summary.get("stopped_early")
     payload["loss_function"] = summary.get("loss_function")
     payload["lr_scheduler"] = summary.get("lr_scheduler")
+    if best_epoch_record is not None:
+        payload["best_epoch_record"] = best_epoch_record
     if history:
         payload["final_epoch"] = history[-1]
 Path(checkpoint_dir, "run_result.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -576,6 +647,7 @@ run_dir = Path(sys.argv[1])
 rows = []
 for result_path in sorted(run_dir.glob("*/run_result.json")):
     result = json.loads(result_path.read_text(encoding="utf-8"))
+    best_epoch_record = result.get("best_epoch_record") or {}
     final_epoch = result.get("final_epoch") or {}
     row = {
         "aspect": result.get("aspect"),
@@ -589,6 +661,7 @@ for result_path in sorted(run_dir.glob("*/run_result.json")):
         "best_checkpoint_metric": result.get("best_checkpoint_metric"),
         "best_epoch": result.get("best_epoch"),
         "best_checkpoint_path": result.get("best_checkpoint_path"),
+        "best_epoch_lr": best_epoch_record.get("lr"),
         "stopped_early": result.get("stopped_early"),
         "loss_function": result.get("loss_function"),
         "lr_scheduler": result.get("lr_scheduler"),
@@ -616,6 +689,12 @@ for result_path in sorted(run_dir.glob("*/run_result.json")):
         row[f"{split_name}_fmax_precision"] = metrics.get("fmax_precision")
         row[f"{split_name}_fmax_recall"] = metrics.get("fmax_recall")
         row[f"{split_name}_graphs"] = metrics.get("graphs")
+        best_metrics = best_epoch_record.get(split_name) or {}
+        row[f"best_{split_name}_loss"] = best_metrics.get("loss")
+        row[f"best_{split_name}_micro_f1"] = best_metrics.get("micro_f1")
+        row[f"best_{split_name}_macro_f1"] = best_metrics.get("macro_f1")
+        row[f"best_{split_name}_fmax"] = best_metrics.get("fmax")
+        row[f"best_{split_name}_fmax_threshold"] = best_metrics.get("fmax_threshold")
     rows.append(row)
 
 (run_dir / "results_summary.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
@@ -633,6 +712,7 @@ base_columns = [
     "best_checkpoint_metric_name",
     "best_checkpoint_metric",
     "best_epoch",
+    "best_epoch_lr",
     "stopped_early",
     "loss_function",
     "lr_scheduler",
@@ -659,8 +739,20 @@ for split_name in ("train", "val", "test"):
             f"{split_name}_graphs",
         ]
     )
+best_metric_columns = []
+for split_name in ("train", "val", "test"):
+    best_metric_columns.extend(
+        [
+            f"best_{split_name}_loss",
+            f"best_{split_name}_micro_f1",
+            f"best_{split_name}_macro_f1",
+            f"best_{split_name}_fmax",
+            f"best_{split_name}_fmax_threshold",
+        ]
+    )
 columns = [
     *base_columns,
+    *best_metric_columns,
     *metric_columns,
     "checkpoint_dir",
     "summary_path",

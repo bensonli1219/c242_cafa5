@@ -281,6 +281,30 @@ class CafaGraphRuntimeTests(unittest.TestCase):
         self.assertEqual(sample.graph_feat.shape[0], graphs.GRAPH_FEAT_DIM)
         self.assertEqual(int(sample.node_modality_mask.sum().item()), 0)
 
+    @unittest.skipIf(graphs.PygData is None, "torch_geometric not installed")
+    def test_pyg_dataset_can_normalize_structural_features(self) -> None:
+        root = self._write_graph_cache()
+        entry = graphs.load_json(root / "metadata" / "entries.json")[0]
+        payload = graphs.torch.load(entry["graph_path"], map_location="cpu", weights_only=False)
+        payload["x"][:, 21] = 80.0
+        payload["x"][:, 26] = 15.0
+        payload["x"][:, 29] = 8.0
+        payload["edge_attr"][:, 0] = 12.0
+        payload["edge_attr"][:, 1] = 10.0
+        payload["edge_attr"][:, 2] = 6.0
+        payload["graph_feat"][0] = 400.0
+        payload["graph_feat"][2] = 80.0
+        graphs.torch.save(payload, entry["graph_path"])
+
+        raw_sample = graphs.CafaPyGDataset(root=root, aspect="BPO", normalize_features=False)[0]
+        normalized_sample = graphs.CafaPyGDataset(root=root, aspect="BPO", normalize_features=True)[0]
+
+        self.assertEqual(float(raw_sample.x[0, 21].item()), 80.0)
+        self.assertAlmostEqual(float(normalized_sample.x[0, 21].item()), 0.8, places=6)
+        self.assertLess(float(normalized_sample.x[0, 29].item()), float(raw_sample.x[0, 29].item()))
+        self.assertAlmostEqual(float(normalized_sample.edge_attr[0, 0].item()), 0.4, places=6)
+        self.assertLess(float(normalized_sample.graph_feat[0].item()), float(raw_sample.graph_feat[0].item()))
+
     @unittest.skipIf(graphs.dgl is None, "dgl not installed")
     def test_dgl_dataset_loads_cached_graph(self) -> None:
         root = self._write_graph_cache()

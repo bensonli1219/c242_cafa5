@@ -22,24 +22,20 @@ from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Iterable, Protocol
 
-import pyarrow as pa
-import pyarrow.compute as pc
-import pyarrow.parquet as pq
-
 try:
     from tqdm import tqdm
     HAVE_TQDM = True
 except ImportError:
     HAVE_TQDM = False
 
-import cafa5_alphafold_pipeline as pipeline
-
 LOG = logging.getLogger(__name__)
 
 try:  # pragma: no cover - optional dependency in the default py313 env
     import torch
-except ImportError:  # pragma: no cover - exercised when graph env is not installed
+    TORCH_IMPORT_ERROR = None
+except ImportError as exc:  # pragma: no cover - exercised when graph env is not installed
     torch = None
+    TORCH_IMPORT_ERROR = exc
 
 try:  # pragma: no cover - optional dependency in the default py313 env
     from torch.utils.data import Dataset as TorchDataset
@@ -49,13 +45,23 @@ except ImportError:  # pragma: no cover
 
 try:  # pragma: no cover - optional dependency in the default py313 env
     from torch_geometric.data import Data as PygData
-except ImportError:  # pragma: no cover
+    PYG_IMPORT_ERROR = None
+except ImportError as exc:  # pragma: no cover
     PygData = None
+    PYG_IMPORT_ERROR = exc
 
 try:  # pragma: no cover - optional dependency in the default py313 env
     import dgl
-except ImportError:  # pragma: no cover
+    DGL_IMPORT_ERROR = None
+except ImportError as exc:  # pragma: no cover
     dgl = None
+    DGL_IMPORT_ERROR = exc
+
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
+
+import cafa5_alphafold_pipeline as pipeline
 
 
 ASPECT_TO_LABEL_KEY = {
@@ -93,7 +99,7 @@ def require_torch():
         raise RuntimeError(
             "torch is required for graph cache serialization and dataset loading. "
             "Use the dedicated Python 3.11 graph environment."
-        )
+        ) from TORCH_IMPORT_ERROR
     return torch
 
 
@@ -103,7 +109,7 @@ def require_pyg():
         raise RuntimeError(
             "torch_geometric is required for CafaPyGDataset. "
             "Install it in the Python 3.11 graph environment."
-        )
+        ) from PYG_IMPORT_ERROR
     return PygData
 
 
@@ -112,7 +118,7 @@ def require_dgl():
     if dgl is None:
         raise RuntimeError(
             "dgl is required for CafaDGLDataset. Install it in the Python 3.11 graph environment."
-        )
+        ) from DGL_IMPORT_ERROR
     return dgl
 
 
@@ -849,6 +855,42 @@ def _default_structure_cache_dir(root: Path) -> Path:
     return root / "modality_cache" / "structure"
 
 
+def normalize_structural_features(payload: dict[str, Any]) -> None:
+    """Scale raw structural/count features to compact numeric ranges.
+
+    The graph cache stores interpretable physical values: pLDDT in 0-100,
+    PAE/distances in Angstrom-like ranges, contact counts, residue counts, and
+    radius of gyration. The small GCN consumes these directly, so this optional
+    transform keeps the same labels and graph topology while reducing scale
+    mismatch between one-hot residue features and continuous structural values.
+    """
+    torch_module = require_torch()
+    x = payload.get("x")
+    edge_attr = payload.get("edge_attr")
+    graph_feat = payload.get("graph_feat")
+
+    if x is not None and x.numel():
+        x[:, 21] = torch_module.clamp(x[:, 21] / 100.0, min=0.0, max=1.0)
+        x[:, 26:29] = torch_module.clamp(x[:, 26:29] / 30.0, min=0.0, max=10.0)
+        x[:, 29:31] = torch_module.log1p(torch_module.clamp(x[:, 29:31], min=0.0)) / math.log1p(64.0)
+        x[:, 29:31] = torch_module.clamp(x[:, 29:31], min=0.0, max=5.0)
+
+    if edge_attr is not None and edge_attr.numel():
+        edge_attr[:, 0] = torch_module.clamp(edge_attr[:, 0] / 30.0, min=0.0, max=10.0)
+        edge_attr[:, 1] = torch_module.log1p(torch_module.clamp(edge_attr[:, 1], min=0.0)) / math.log1p(1200.0)
+        edge_attr[:, 1] = torch_module.clamp(edge_attr[:, 1], min=0.0, max=5.0)
+        edge_attr[:, 2] = torch_module.clamp(edge_attr[:, 2] / 30.0, min=0.0, max=10.0)
+
+    if graph_feat is not None and graph_feat.numel() >= GRAPH_FEAT_DIM:
+        graph_feat[0] = torch_module.log1p(torch_module.clamp(graph_feat[0], min=0.0)) / math.log1p(1200.0)
+        graph_feat[1] = torch_module.log1p(torch_module.clamp(graph_feat[1], min=0.0)) / math.log1p(10.0)
+        graph_feat[2:4] = torch_module.clamp(graph_feat[2:4] / 100.0, min=0.0, max=1.0)
+        graph_feat[8] = torch_module.log1p(torch_module.clamp(graph_feat[8], min=0.0)) / math.log1p(64.0)
+        graph_feat[8] = torch_module.clamp(graph_feat[8], min=0.0, max=5.0)
+        graph_feat[10:12] = torch_module.clamp(graph_feat[10:12] / 30.0, min=0.0, max=10.0)
+        graph_feat[12] = torch_module.clamp(graph_feat[12] / 100.0, min=0.0, max=10.0)
+
+
 class _BaseCafaGraphDataset(TorchDataset):
     def __init__(
         self,
@@ -860,6 +902,7 @@ class _BaseCafaGraphDataset(TorchDataset):
         use_esm2: bool = True,
         use_dssp: bool = True,
         use_sasa: bool = True,
+        normalize_features: bool = False,
         esm2_cache_dir: str | Path | None = None,
         structure_cache_dir: str | Path | None = None,
     ) -> None:
@@ -873,6 +916,7 @@ class _BaseCafaGraphDataset(TorchDataset):
         self.use_esm2 = use_esm2
         self.use_dssp = use_dssp
         self.use_sasa = use_sasa
+        self.normalize_features = normalize_features
         self.esm2_cache_dir = Path(esm2_cache_dir) if esm2_cache_dir else _default_esm2_cache_dir(self.root)
         self.structure_cache_dir = (
             Path(structure_cache_dir) if structure_cache_dir else _default_structure_cache_dir(self.root)
@@ -922,6 +966,8 @@ class _BaseCafaGraphDataset(TorchDataset):
         payload["node_modality_mask"] = payload["node_modality_mask"].clone()
         self._apply_structure_cache(payload)
         self._apply_esm2_cache(payload)
+        if self.normalize_features:
+            normalize_structural_features(payload)
         payload["y"] = self._encode_labels(payload["labels"][self.aspect])
         return payload
 

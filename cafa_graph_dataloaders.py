@@ -12,8 +12,8 @@ import random
 from pathlib import Path
 from typing import Any, Iterable
 
-import cafa5_alphafold_pipeline as pipeline
 import cafa_graph_dataset as graphs
+import cafa5_alphafold_pipeline as pipeline
 
 try:  # pragma: no cover - optional in the default py313 env
     import torch
@@ -22,13 +22,17 @@ except ImportError:  # pragma: no cover
 
 try:  # pragma: no cover - optional in the default py313 env
     from torch_geometric.loader import DataLoader as PygDataLoader
-except ImportError:  # pragma: no cover
+    PYG_LOADER_IMPORT_ERROR = None
+except ImportError as exc:  # pragma: no cover
     PygDataLoader = None
+    PYG_LOADER_IMPORT_ERROR = exc
 
 try:  # pragma: no cover - optional in the default py313 env
     from dgl.dataloading import GraphDataLoader as DGLGraphDataLoader
-except ImportError:  # pragma: no cover
+    DGL_LOADER_IMPORT_ERROR = None
+except ImportError as exc:  # pragma: no cover
     DGLGraphDataLoader = None
+    DGL_LOADER_IMPORT_ERROR = exc
 
 
 DEFAULT_ASPECTS = ("BPO", "CCO", "MFO")
@@ -73,7 +77,7 @@ def require_torch():
 def require_pyg_loader():
     require_torch()
     if PygDataLoader is None:
-        raise RuntimeError("torch_geometric is required for PyG dataloaders.")
+        raise RuntimeError("torch_geometric is required for PyG dataloaders.") from PYG_LOADER_IMPORT_ERROR
     return PygDataLoader
 
 
@@ -81,7 +85,7 @@ def require_dgl_loader():
     require_torch()
     graphs.require_dgl()
     if DGLGraphDataLoader is None:
-        raise RuntimeError("dgl is required for DGL dataloaders.")
+        raise RuntimeError("dgl is required for DGL dataloaders.") from DGL_LOADER_IMPORT_ERROR
     return DGLGraphDataLoader
 
 
@@ -108,6 +112,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--disable-esm2", action="store_true")
     parser.add_argument("--disable-dssp", action="store_true")
     parser.add_argument("--disable-sasa", action="store_true")
+    parser.add_argument("--normalize-features", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -296,6 +301,7 @@ def build_split_dataset(
     use_esm2: bool = True,
     use_dssp: bool = True,
     use_sasa: bool = True,
+    normalize_features: bool = False,
 ):
     entry_id_file = split_dir_for_aspect(Path(split_dir), aspect) / f"{split_name}.txt"
     if framework == "pyg":
@@ -307,6 +313,7 @@ def build_split_dataset(
             use_esm2=use_esm2,
             use_dssp=use_dssp,
             use_sasa=use_sasa,
+            normalize_features=normalize_features,
         )
     if framework == "dgl":
         return graphs.CafaDGLDataset(
@@ -317,6 +324,7 @@ def build_split_dataset(
             use_esm2=use_esm2,
             use_dssp=use_dssp,
             use_sasa=use_sasa,
+            normalize_features=normalize_features,
         )
     raise ValueError(f"Unknown framework: {framework}")
 
@@ -330,6 +338,7 @@ def build_split_datasets(
     use_esm2: bool = True,
     use_dssp: bool = True,
     use_sasa: bool = True,
+    normalize_features: bool = False,
 ) -> dict[str, Any]:
     return {
         split_name: build_split_dataset(
@@ -342,6 +351,7 @@ def build_split_datasets(
             use_esm2=use_esm2,
             use_dssp=use_dssp,
             use_sasa=use_sasa,
+            normalize_features=normalize_features,
         )
         for split_name in SPLIT_NAMES
     }
@@ -432,6 +442,7 @@ def build_pyg_dataloaders(
     use_esm2: bool = True,
     use_dssp: bool = True,
     use_sasa: bool = True,
+    normalize_features: bool = False,
 ) -> dict[str, Any]:
     datasets = build_split_datasets(
         framework="pyg",
@@ -442,6 +453,7 @@ def build_pyg_dataloaders(
         use_esm2=use_esm2,
         use_dssp=use_dssp,
         use_sasa=use_sasa,
+        normalize_features=normalize_features,
     )
     return {
         split_name: build_pyg_loader(
@@ -466,6 +478,7 @@ def build_dgl_dataloaders(
     use_esm2: bool = True,
     use_dssp: bool = True,
     use_sasa: bool = True,
+    normalize_features: bool = False,
 ) -> dict[str, Any]:
     datasets = build_split_datasets(
         framework="dgl",
@@ -476,6 +489,7 @@ def build_dgl_dataloaders(
         use_esm2=use_esm2,
         use_dssp=use_dssp,
         use_sasa=use_sasa,
+        normalize_features=normalize_features,
     )
     return {
         split_name: build_dgl_loader(
@@ -525,6 +539,7 @@ def verify_loader_summary(
     use_esm2: bool = True,
     use_dssp: bool = True,
     use_sasa: bool = True,
+    normalize_features: bool = False,
 ) -> dict[str, Any]:
     if framework == "pyg":
         datasets = build_split_datasets(
@@ -536,6 +551,7 @@ def verify_loader_summary(
             use_esm2=use_esm2,
             use_dssp=use_dssp,
             use_sasa=use_sasa,
+            normalize_features=normalize_features,
         )
         loaders = {
             split_name: build_pyg_loader(
@@ -557,6 +573,7 @@ def verify_loader_summary(
             use_esm2=use_esm2,
             use_dssp=use_dssp,
             use_sasa=use_sasa,
+            normalize_features=normalize_features,
         )
         loaders = {
             split_name: build_dgl_loader(
@@ -616,6 +633,7 @@ def main(argv: list[str] | None = None) -> int:
                 use_esm2=not args.disable_esm2,
                 use_dssp=not args.disable_dssp,
                 use_sasa=not args.disable_sasa,
+                normalize_features=args.normalize_features,
             )
 
     payload = {

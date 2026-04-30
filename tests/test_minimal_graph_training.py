@@ -6,6 +6,7 @@ from pathlib import Path
 
 import cafa_graph_dataloaders as dataloaders
 import cafa_graph_dataset as graphs
+import export_graph_prediction_bundles as graph_exporter
 import train_minimal_graph_model as training
 
 
@@ -196,6 +197,118 @@ class MinimalGraphTrainingTests(unittest.TestCase):
         capped = training.build_pos_weight_tensor(StubDataset(), power=0.5, max_pos_weight=1.5)
         self.assertAlmostEqual(float(capped[0].item()), 1.0)
         self.assertAlmostEqual(float(capped[1].item()), 1.5)
+
+    def test_load_go_parent_pairs_filters_to_vocab(self) -> None:
+        obo_path = self.tmpdir / "go-basic.obo"
+        obo_path.write_text(
+            "\n".join(
+                [
+                    "format-version: 1.2",
+                    "",
+                    "[Term]",
+                    "id: GO:0001",
+                    "name: root",
+                    "",
+                    "[Term]",
+                    "id: GO:0002",
+                    "name: child",
+                    "is_a: GO:0001 ! root",
+                    "is_a: GO:9999 ! outside_vocab",
+                    "",
+                    "[Term]",
+                    "id: GO:0003",
+                    "name: ignored",
+                    "is_a: GO:0001 ! root",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        pairs = training.load_go_parent_pairs(obo_path, ["GO:0001", "GO:0002"])
+
+        self.assertEqual(pairs, [(1, 0)])
+
+    def test_compute_label_ontology_regularization_matches_expected_penalty(self) -> None:
+        embedding = graphs.torch.nn.Embedding(2, 2)
+        with graphs.torch.no_grad():
+            embedding.weight.copy_(graphs.torch.tensor([[0.0, 0.0], [1.0, 2.0]]))
+
+        class StubModel:
+            def __init__(self, label_embeddings):
+                self.label_embeddings = label_embeddings
+
+            def parameters(self):
+                yield self.label_embeddings.weight
+
+        model = StubModel(embedding)
+        config = {
+            "enabled": True,
+            "weight": 0.5,
+            "regularizer": graphs.torch.tensor([[1, 0]], dtype=graphs.torch.long),
+        }
+
+        regularization = training.compute_label_ontology_regularization(model, config)
+
+        self.assertAlmostEqual(float(regularization.item()), 1.25)
+
+    @unittest.skipIf(training.GCNConv is None, "torch_geometric not installed")
+    def test_export_graph_prediction_bundles_writes_sequence_compatible_bundle(self) -> None:
+        root, split_root = self._write_graph_cache()
+        checkpoint_path = self.tmpdir / "best.pt"
+        model = training.build_model(
+            framework="pyg",
+            output_dim=1,
+            hidden_dim=8,
+            dropout=0.1,
+            model_head="flat_linear",
+        )
+        graphs.torch.save(
+            {
+                "framework": "pyg",
+                "aspect": "BPO",
+                "model_state": model.state_dict(),
+                "args": {
+                    "root": str(root),
+                    "split_dir": str(split_root),
+                    "aspect": "BPO",
+                    "framework": "pyg",
+                    "batch_size": 2,
+                    "hidden_dim": 8,
+                    "dropout": 0.1,
+                    "model_head": "flat_linear",
+                    "min_term_frequency": 1,
+                    "seed": 2026,
+                },
+            },
+            checkpoint_path,
+        )
+        output_dir = self.tmpdir / "graph_bundles"
+
+        result = graph_exporter.main(
+            [
+                "--checkpoint-path",
+                str(checkpoint_path),
+                "--output-dir",
+                str(output_dir),
+                "--export-splits",
+                "val",
+                "--device",
+                "cpu",
+            ]
+        )
+
+        self.assertEqual(result, 0)
+        val_bundle = output_dir / "val"
+        self.assertTrue((val_bundle / "scores.npy").exists())
+        self.assertTrue((val_bundle / "logits.npy").exists())
+        self.assertTrue((val_bundle / "entry_ids.txt").exists())
+        self.assertTrue((val_bundle / "terms.txt").exists())
+        scores = __import__("numpy").load(val_bundle / "scores.npy")
+        self.assertEqual(scores.shape[1], 1)
+        meta = __import__("json").loads((val_bundle / "meta.json").read_text(encoding="utf-8"))
+        self.assertEqual(meta["aspect"], "BPO")
+        self.assertEqual(meta["framework"], "pyg")
 
 
 if __name__ == "__main__":

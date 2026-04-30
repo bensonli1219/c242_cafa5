@@ -1,0 +1,7 @@
+numpy<2
+pandas
+pyarrow
+ipykernel
+jupyterlab
+notebook
+

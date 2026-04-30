@@ -4,10 +4,24 @@ __pycache__/
 .pytest_cache/
 .venv/
 .venv311/
+.codex
+.codex/
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
 ~$*.docx
 
 # Generated data and local outputs stay inside the repo folder but are not versioned.
 /data/alphafold_demo/
 /data/kaggle_cafa5/cafa5_competition_data.zip
 /data/kaggle_cafa5/extracted/
+/output/
 /outputs/
+
+# Local run logs and training artifacts.
+*.err
+*.log
+*.out
+nohup.out
+*.ckpt
+*.pt
+*.pth
