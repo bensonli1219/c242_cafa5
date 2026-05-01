@@ -20,14 +20,14 @@ fi
 source "$ENV_DIR/bin/activate"
 
 python -m pip install --upgrade pip setuptools wheel
-python -m pip install -r "$ROOT_DIR/requirements-notebook-savio.txt"
+python -m pip install -r "$ROOT_DIR/requirements/notebook-savio.txt"
 
 if [[ "$INSTALL_FULL_GRAPH" == "1" ]]; then
-  python -m pip install -r "$ROOT_DIR/requirements-graph-local.txt"
+  python -m pip install -r "$ROOT_DIR/requirements/graph-local.txt"
 fi
 
 if [[ "$INSTALL_MULTIMODAL" == "1" ]]; then
-  python -m pip install -r "$ROOT_DIR/requirements-remote-multimodal.txt"
+  python -m pip install -r "$ROOT_DIR/requirements/remote-multimodal.txt"
 fi
 
 python -m ipykernel install --user --name "$KERNEL_NAME" --display-name "$KERNEL_DISPLAY_NAME"

@@ -22,8 +22,8 @@ mkdir -p "$TMPDIR" "$PIP_CACHE_DIR"
 export TMPDIR PIP_CACHE_DIR
 
 python -m pip install --upgrade pip setuptools wheel
-python -m pip install -r "$ROOT_DIR/requirements-notebook-savio.txt"
-python -m pip install -r "$ROOT_DIR/requirements-graph-savio-cu121.txt"
+python -m pip install -r "$ROOT_DIR/requirements/notebook-savio.txt"
+python -m pip install -r "$ROOT_DIR/requirements/graph-savio-cu121.txt"
 python -m ipykernel install --user --name "$KERNEL_NAME" --display-name "$KERNEL_DISPLAY_NAME"
 
 cat <<EOF
