@@ -182,19 +182,19 @@ Current best full-run checkpoints:
 - `CCO`: raw baseline
 - `MFO`: raw baseline
 
-## 5. Completed Targeted Ablation Round (`E0`-`E5`)
+## 5. Hyperparameter Sweep
 
 After the baseline, normalized, and tuned full runs, the team completed a
 focused ablation round around the raw baseline on `CCO` and `MFO`.
 
 This round tested:
 
-- `E0`: baseline control rerun
-- `E1`: lower learning rate `0.0007`
-- `E2`: lower learning rate `0.0005`
-- `E3`: `hidden_dim = 192`
-- `E4`: `hidden_dim = 256`
-- `E5`: `weighted_bce`
+- `control rerun`: baseline control rerun
+- `lr=7e-4 variant`: lower learning rate `0.0007`
+- `lr=5e-4 variant`: lower learning rate `0.0005`
+- `hidden=192 variant`: `hidden_dim = 192`
+- `hidden=256 variant`: `hidden_dim = 256`
+- `weighted-BCE variant`: `weighted_bce`
 
 Main findings from that round:
 
@@ -203,7 +203,7 @@ Main findings from that round:
 - `MFO` showed only small movement across variants.
 - `weighted_bce` produced a positive signal on `MFO`, but the gain was not large
   enough to justify continuing that line as the main next-step strategy.
-- `E1/CCO` was interrupted by a dataloader/cache-related failure, so that result
+- `the lr=7e-4 variant/CCO` was interrupted by a dataloader/cache-related failure, so that result
   is not treated as a clean final comparison.
 
 Interpretation:
@@ -264,7 +264,7 @@ For the current project stage, this means:
 
 ### 6.5 Local Raw-Style Tuning Has Limited Headroom
 
-The completed `E0`-`E5` round strongly suggests that the current bottleneck is
+The completed the single-factor hyperparameter sweep round strongly suggests that the current bottleneck is
 not well described by small changes in:
 
 - learning rate
@@ -281,17 +281,17 @@ At the moment, the graph line is in the following state:
 
 - full graph baseline exists and is usable
 - the normalized and tuned full-data alternatives have been completed
-- the focused `E0`-`E5` ablation round has also been completed
+- the focused single-factor hyperparameter sweep has also been completed
 - none of the completed alternatives has produced a convincing improvement over
   the raw full graph baseline on `Fmax`
 - the current best full graph results are already known for `CCO` and `MFO`
-- the first `N1`/`N2`/`N3` significant-improvement graph batch has completed
-- `N3` is now the first graph-side direction in this project to beat the raw
+- the first `focal-BCE attempt`/`logit-adjustment attempt`/`label-aware scorer` significant-improvement graph batch has completed
+- `label-aware scorer` is now the first graph-side direction in this project to beat the raw
   baseline clearly on `CCO`
-- the first `N4` sequence-side matched-cohort run has completed and produced
+- the first `sequence+structure fusion` sequence-side matched-cohort run has completed and produced
   graph-vocab prediction bundles for `MFO`
-- two `N4` MFO score-level fusion passes have completed: one against the raw
-  available graph checkpoint and one against the N3 MFO graph checkpoint
+- two `sequence+structure fusion` MFO score-level fusion passes have completed: one against the raw
+  available graph checkpoint and one against the label-aware scorer MFO graph checkpoint
 
 In other words, the graph work is not blocked by lack of a baseline. The graph work is now at the stage of targeted improvement and better evaluation.
 
@@ -301,15 +301,15 @@ Current active or recently completed jobs as of the latest check:
 
 | Direction | Job ID | Slurm Name | Status | Run Name | Notes |
 | --- | ---: | --- | --- | --- | --- |
-| `N1` | `33706651` | `cafa5_n1_focal_bce` | `COMPLETED` | `sigimp_n1_focal_bce_20260422_172916` | focal-style BCE objective; lost to baseline on both aspects |
-| `N2` | `33706652` | `cafa5_n2_logit_adjust` | `COMPLETED` | `sigimp_n2_logit_adjust_20260422_172916` | train-prior logit adjustment; nearly neutral overall |
-| `N3` | `33706654` | `cafa5_n3_label_dot` | `COMPLETED` | `sigimp_n3_label_dot_20260422_172916` | label-dot scorer; strong `CCO` win |
-| `N4 sequence` | `33706500` | `cafa5_n4_mfo` | `COMPLETED` | `sigimp_n4_seq_small_mfo_mlp_20260422_172448` | first sequence-side MFO run; superseded by graph-vocab sequence bundle |
-| `N4 fusion` | n/a | local/slurm fusion | `COMPLETED` | `raw_mfo_x_seq_graph_vocab_20260424_222500` | first score-fusion pass using raw available graph `best.pt` |
-| `N4 fusion` | `33740526` | `cafa5_n4_fusion` | `COMPLETED` | `n3_mfo_x_seq_graph_vocab_20260424_222500` | second score-fusion pass using N3 MFO epoch-3 `best.pt` |
-| `N3 confirm` | `33741105` | `cafa5_n3_confirm_long` | `RUNNING` | `sigimp_n3_confirm_long_20260425_n3_confirm` | same-seed longer confirmation; `EPOCHS=8`, `CCO MFO` |
+| `focal-BCE attempt` | `33706651` | `cafa5_n1_focal_bce` | `COMPLETED` | `sigimp_n1_focal_bce_20260422_172916` | focal-style BCE objective; lost to baseline on both aspects |
+| `logit-adjustment attempt` | `33706652` | `cafa5_n2_logit_adjust` | `COMPLETED` | `sigimp_n2_logit_adjust_20260422_172916` | train-prior logit adjustment; nearly neutral overall |
+| `label-aware scorer` | `33706654` | `cafa5_n3_label_dot` | `COMPLETED` | `sigimp_n3_label_dot_20260422_172916` | label-dot scorer; strong `CCO` win |
+| `fusion: sequence branch` | `33706500` | `cafa5_n4_mfo` | `COMPLETED` | `sigimp_n4_seq_small_mfo_mlp_20260422_172448` | first sequence-side MFO run; superseded by graph-vocab sequence bundle |
+| `fusion: late combine` | n/a | local/slurm fusion | `COMPLETED` | `raw_mfo_x_seq_graph_vocab_20260424_222500` | first score-fusion pass using raw available graph `best.pt` |
+| `fusion: late combine` | `33740526` | `cafa5_n4_fusion` | `COMPLETED` | `n3_mfo_x_seq_graph_vocab_20260424_222500` | second score-fusion pass using the label-aware scorer MFO epoch-3 `best.pt` |
+| `label-aware confirm run` | `33741105` | `cafa5_n3_confirm_long` | `RUNNING` | `sigimp_n3_confirm_long_20260425_n3_confirm` | same-seed longer confirmation; `EPOCHS=8`, `CCO MFO` |
 
-The `N1`/`N2`/`N3` batch uses the fixed reference setup on `CCO` and `MFO`:
+The `focal-BCE attempt`/`logit-adjustment attempt`/`label-aware scorer` batch uses the fixed reference setup on `CCO` and `MFO`:
 
 - `hidden_dim = 128`
 - `dropout = 0.20`
@@ -323,9 +323,9 @@ The `N1`/`N2`/`N3` batch uses the fixed reference setup on `CCO` and `MFO`:
 
 The only intended changes in that batch are:
 
-- `N1`: `LOSS_FUNCTION=focal_bce`
-- `N2`: `LOGIT_ADJUSTMENT=train_prior`
-- `N3`: `MODEL_HEAD=label_dot`
+- `focal-BCE attempt`: `LOSS_FUNCTION=focal_bce`
+- `logit-adjustment attempt`: `LOGIT_ADJUSTMENT=train_prior`
+- `label-aware scorer`: `MODEL_HEAD=label_dot`
 
 Observed outcomes against the raw baseline
 `/global/scratch/users/bensonli/cafa5_outputs/graph_cache/training_runs/full_graph_pyg_mtf20_33234089`:
@@ -333,40 +333,40 @@ Observed outcomes against the raw baseline
 | Direction | Aspect | Best Validation Fmax | Delta vs Raw | Best Test Fmax | Delta vs Raw | Interpretation |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
 | raw baseline | `CCO` | `0.5635` | `0.0000` | `0.5647` | `0.0000` | reference |
-| `N1` | `CCO` | `0.5591` | `-0.0044` | `0.5609` | `-0.0038` | worse |
-| `N2` | `CCO` | `0.5637` | `+0.0002` | `0.5652` | `+0.0005` | effectively tied |
-| `N3` | `CCO` | `0.5822` | `+0.0187` | `0.5843` | `+0.0196` | clear win |
+| `focal-BCE attempt` | `CCO` | `0.5591` | `-0.0044` | `0.5609` | `-0.0038` | worse |
+| `logit-adjustment attempt` | `CCO` | `0.5637` | `+0.0002` | `0.5652` | `+0.0005` | effectively tied |
+| `label-aware scorer` | `CCO` | `0.5822` | `+0.0187` | `0.5843` | `+0.0196` | clear win |
 | raw baseline | `MFO` | `0.4522` | `0.0000` | `0.4574` | `0.0000` | reference |
-| `N1` | `MFO` | `0.4452` | `-0.0070` | `0.4513` | `-0.0061` | worse |
-| `N2` | `MFO` | `0.4505` | `-0.0017` | `0.4558` | `-0.0016` | slightly worse |
-| `N3` | `MFO` | `0.4517` | `-0.0005` | `0.4580` | `+0.0006` | essentially tied; slight test gain |
+| `focal-BCE attempt` | `MFO` | `0.4452` | `-0.0070` | `0.4513` | `-0.0061` | worse |
+| `logit-adjustment attempt` | `MFO` | `0.4505` | `-0.0017` | `0.4558` | `-0.0016` | slightly worse |
+| `label-aware scorer` | `MFO` | `0.4517` | `-0.0005` | `0.4580` | `+0.0006` | essentially tied; slight test gain |
 
 Result summary:
 
-- `N1` did not improve either aspect and should not be prioritized next.
-- `N2` showed only tiny movement on `CCO` and small regression on `MFO`, so it
+- `focal-BCE attempt` did not improve either aspect and should not be prioritized next.
+- `logit-adjustment attempt` showed only tiny movement on `CCO` and small regression on `MFO`, so it
   is not strong enough to become the main branch by itself.
-- `N3` is the first result in this significant-improvement round that clearly
+- `label-aware scorer` is the first result in this significant-improvement round that clearly
   beats the raw graph baseline, and it does so on the higher-signal `CCO`
   branch with a substantial margin.
 
-Observed `N4` MFO score-fusion outcomes:
+Observed `sequence+structure fusion` MFO score-fusion outcomes:
 
 | Fusion Run | Graph Branch | Val-Selected Weight | Validation Fmax | Test Fmax at Same Weight | Test-Best Diagnostic |
 | --- | --- | --- | ---: | ---: | ---: |
 | sequence only | n/a | `g0p0_s1p0` | `0.4513` | `0.4557` | `0.4557` |
 | raw fusion | raw available `best.pt` | `g0p2_s0p8` | `0.4518` | `0.4566` | `0.4575` |
-| N3 fusion | N3 MFO epoch-3 `best.pt` | `g0p8_s0p2` | `0.4529` | `0.4579` | `0.4582` |
+| label-aware fusion | the label-aware scorer MFO epoch-3 `best.pt` | `g0p8_s0p2` | `0.4529` | `0.4579` | `0.4582` |
 
 Interpretation:
 
 - The raw fusion pass is useful as a reference, but its graph branch used the
   available raw `best.pt` export, whose graph-only row is `0.4499 / 0.4571` in
   this matched-bundle evaluation.
-- The N3 fusion pass is closer to the intended "best available graph +
-  sequence" `N4` comparison because N3 MFO checkpoint selection is normal
+- The label-aware fusion pass is closer to the intended "best available graph +
+  sequence" `sequence+structure fusion` comparison because the label-aware scorer MFO checkpoint selection is normal
   (`best_epoch = 3`).
-- N3+sequence fusion improves validation Fmax slightly over N3 graph-only, but
+- the label-aware-plus-sequence fusion improves validation Fmax slightly over the label-aware graph-only, but
   the test-side change is tiny; this is weak complementarity rather than a
   decisive multimodal gain.
 
@@ -374,23 +374,23 @@ Interpretation:
 
 The key questions that remain open are:
 
-1. How much of the `N3` gain comes from the label-aware scorer itself versus
+1. How much of the `label-aware scorer` gain comes from the label-aware scorer itself versus
    the exact label embedding parameterization and threshold choice?
-2. Can GO hierarchy information be injected into the `N3` branch so the model
+2. Can GO hierarchy information be injected into the `label-aware scorer` branch so the model
    learns a better label space rather than treating GO terms as independent IDs?
 3. Does a cleaner sequence-plus-graph fusion strategy outperform the current
    graph-only baseline on the matched structure-available cohort, especially if
-   the graph branch uses the `N3` head instead of the flat baseline head?
-4. Is there any cheap post-hoc calibration utility worth keeping from `N2`, or
+   the graph branch uses the `label-aware scorer` head instead of the flat baseline head?
+4. Is there any cheap post-hoc calibration utility worth keeping from `logit-adjustment attempt`, or
    was its effect too small to justify a dedicated branch right now?
 
 ## 9. Next Active Exploration Directions
 
 The next round should focus on the following three directions:
 
-1. Extend the winning `N3` label-aware scorer rather than continuing flat-head
+1. Extend the winning `label-aware scorer` label-aware scorer rather than continuing flat-head
    objective tuning.
-2. Treat the completed N3 MFO `N4` fusion as the first real score-level
+2. Treat the completed the label-aware MFO fusion as the first real score-level
    sequence-plus-graph comparison, then decide whether a broader fusion search
    is worth the cost.
 3. Add better evaluation and comparison utilities so future result collection is
@@ -405,52 +405,52 @@ the flat raw baseline.
 The next implementation direction should now be chosen from the observed
 results rather than from another manual hyperparameter sweep.
 
-Decision after the first `N1`-`N3` batch:
+Decision after the first this batch of experiments:
 
-- `N1` should stop here; the focal-style loss variant is not competitive on the
+- `focal-BCE attempt` should stop here; the focal-style loss variant is not competitive on the
   fixed full-data setup.
-- `N2` should not become the main branch; at most, keep its logic available as
-  an optional post-hoc utility if later `N3`-style runs show calibration drift.
-- `N3` should become the primary graph-side branch. The next graph change
+- `logit-adjustment attempt` should not become the main branch; at most, keep its logic available as
+  an optional post-hoc utility if later `label-aware scorer`-style runs show calibration drift.
+- `label-aware scorer` should become the primary graph-side branch. The next graph change
   should be GO-term initialization, ontology-aware regularization, or another
   stronger label-aware scorer built on the same idea.
-- `N4` remains important because it tests modality complementarity rather than
-  graph-head design; fusion work should continue in parallel with `N3`
+- `sequence+structure fusion` remains important because it tests modality complementarity rather than
+  graph-head design; fusion work should continue in parallel with `label-aware scorer`
   refinement.
 
 Implementation tasks to queue after result collection:
 
 - add a comparison helper that reads the `sigimp_*` run directories and produces
-  one `N1`-`N4` table
+  one the architecture-and-objective experiments table
 - keep the graph-side prediction-bundle export path and consider a smaller
   follow-up fusion search only if calibration or weighting can be justified
-- add one `N3` follow-up branch with GO-term initialization or ontology-aware
+- add one `label-aware scorer` follow-up branch with GO-term initialization or ontology-aware
   label regularization
-- run one longer `N3` confirmation job with the same seed, then a second-seed
+- run one longer `label-aware scorer` confirmation job with the same seed, then a second-seed
   stability check before treating it as the official new graph recipe
 
 ## 11. Summary
 
 The graph team has already completed the main baseline, the normalized and tuned
-full-data alternatives, the focused `E0`-`E5` ablation round, and the first
-`N1`-`N3` significant-improvement batch.
+full-data alternatives, the focused single-factor hyperparameter sweep, and the first
+the architecture-and-objective experiments significant-improvement batch.
 
 The main findings so far are:
 
-- the raw full graph baseline remains the main reference, but `N3` is now the
+- the raw full graph baseline remains the main reference, but `label-aware scorer` is now the
   strongest observed `CCO` graph result
 - the normalized full run did not beat the raw baseline
 - the tuned full run also did not beat the raw baseline
-- the focused `E0`-`E5` ablation round did not reveal a strong enough local
+- the focused single-factor hyperparameter sweep did not reveal a strong enough local
   tuning gain to justify continuing that direction
 - `BPO` remains out of scope for formal graph reporting because the full graph runs were not stable enough under current memory constraints
-- `N1` lost to the raw baseline on both aspects
-- `N2` produced only negligible movement and did not establish calibration as
+- `focal-BCE attempt` lost to the raw baseline on both aspects
+- `logit-adjustment attempt` produced only negligible movement and did not establish calibration as
   the main bottleneck
-- `N3` clearly improved `CCO` and is now the leading graph-side follow-up
-- `N4` has completed one raw-checkpoint fusion pass and one N3 MFO fusion pass;
-  the N3 fusion shows only a small validation-side gain
+- `label-aware scorer` clearly improved `CCO` and is now the leading graph-side follow-up
+- `sequence+structure fusion` has completed one raw-checkpoint fusion pass and one label-aware MFO fusion pass;
+  the label-aware fusion shows only a small validation-side gain
 
 The next discussion should therefore focus on objective design, label-aware
-modeling, sequence-structure integration, and `N3` confirmation, rather than
+modeling, sequence-structure integration, and `label-aware scorer` confirmation, rather than
 another round of local baseline tuning.

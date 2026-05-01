@@ -2,14 +2,14 @@
 
 更新日期：2026-04-26
 
-這份文件整理目前 CAFA5 專案從資料取得、前處理、graph cache 建立、baseline 訓練、調參、到 N3/N4 後續實驗的完整脈絡。重點不是只列結果，而是說明每一步為什麼要做、得到什麼結果、以及我們根據結果做了什麼下一步決策。
+這份文件整理目前 CAFA5 專案從資料取得、前處理、graph cache 建立、baseline 訓練、調參、到 the label-aware scorer/the sequence+structure fusion 後續實驗的完整脈絡。重點不是只列結果，而是說明每一步為什麼要做、得到什麼結果、以及我們根據結果做了什麼下一步決策。
 
 主要結論：
 
-- 我們已完成 graph training 的主流程，包含 full graph baseline、normalized feature run、tuned run、E0-E5 ablation、N1-N3 significant-improvement batch、N3 formal confirmation、N3 stability run、ontology regularization follow-up、以及 MFO 的 N4 sequence-graph fusion。
+- 我們已完成 graph training 的主流程，包含 full graph baseline、normalized feature run、tuned run、the single-factor hyperparameter sweep ablation、the architecture-and-objective experiments significant-improvement batch、the label-aware scorer formal confirmation、the label-aware scorer stability run、ontology regularization follow-up、以及 MFO 的 the sequence+structure fusion sequence-graph fusion。
 - `BPO` full graph training 在目前記憶體預算下不穩定，所以正式 graph 實驗目前聚焦 `CCO` 與 `MFO`。
-- `N3` label-aware scorer 是目前第一個明確打贏 raw graph baseline 的方向，尤其在 `CCO` 上效果穩定。
-- `MFO` 目前沒有出現像 `CCO` 那樣的大幅突破；E5 weighted BCE、N3、N4 fusion 都只有小幅改善或接近持平。
+- `label-aware scorer` label-aware scorer 是目前第一個明確打贏 raw graph baseline 的方向，尤其在 `CCO` 上效果穩定。
+- `MFO` 目前沒有出現像 `CCO` 那樣的大幅突破；the weighted-BCE variant weighted BCE、the label-aware scorer、the sequence+structure fusion fusion 都只有小幅改善或接近持平。
 
 ## 1. 結果來源
 
@@ -18,11 +18,11 @@
 | 類型 | 路徑 / 文件 | 用途 |
 | --- | --- | --- |
 | 原始計畫 | `docs/planning/experiment_plan.md` | 早期資料、cohort、split、label policy、model track 設計 |
-| Graph 進度 | `docs/reports/graph_training_progress_report.md` | baseline、normalized、tuned、N1-N4 初步結果脈絡 |
-| N1-N4 計畫 | `docs/planning/graph_significant_improvement_exploration_plan.md` | N1-N4 實驗動機與 follow-up rule |
+| Graph 進度 | `docs/reports/graph_training_progress_report.md` | baseline、normalized、tuned、the architecture-and-objective experiments 初步結果脈絡 |
+| the architecture-and-objective experiments 計畫 | `docs/planning/graph_significant_improvement_exploration_plan.md` | the architecture-and-objective experiments 實驗動機與 follow-up rule |
 | Graph full runs | `/global/scratch/users/bensonli/cafa5_outputs/graph_cache/training_runs` | 主要訓練結果 |
 | Normalized graph run | `/global/scratch/users/bensonli/cafa5_outputs/graph_cache_normalized_features/training_runs` | normalized feature full-data 結果 |
-| Sequence / fusion | `/global/scratch/users/bensonli/cafa5_outputs/sequence_runs`、`/global/scratch/users/bensonli/cafa5_outputs/n4_fusion` | N4 sequence branch 與 late fusion 結果 |
+| Sequence / fusion | `/global/scratch/users/bensonli/cafa5_outputs/sequence_runs`、`/global/scratch/users/bensonli/cafa5_outputs/n4_fusion` | the sequence+structure fusion sequence branch 與 late fusion 結果 |
 
 注意：部分早期 `results_summary.json` 只存 final epoch 指標；本文件對 raw baseline 與 tuned run 使用各 aspect `summary.json` 中 history 的 best validation Fmax epoch 作為正式比較值。
 
@@ -33,11 +33,11 @@
 | 資料與 notebook 探索 | 確認 CAFA5 序列、label、AlphaFold coverage | raw sequence/label 統計、早期 k-mer/ESM baseline 概念 | label space 很大且 long-tailed，需要 per-aspect 和 frequency threshold | 建立可重現 pipeline |
 | Graph preprocessing | 建立 structure-available graph cache | graph cache、aspect splits、vocab | `CCO/MFO/BPO` split 都能產生，但 BPO 訓練不穩 | 正式 graph training 聚焦 CCO/MFO |
 | Small smoke runs | 驗證訓練 loop、metrics、checkpoint | local small experiment summaries | normalized 在 tiny MFO sample 有明顯訊號 | 跑 full normalized graph |
-| Full graph baseline | 建立 raw graph reference | raw baseline, tuned, normalized runs | raw baseline 很強；normalized/tuned 都未超越 | 做更乾淨的 E0-E5 ablation |
-| E0-E5 ablation | 測 learning rate、capacity、weighted BCE | E0-E5 results | 只有 MFO 小幅上升，沒有 CCO 大突破 | 停止 local tuning，改測高槓桿方向 |
-| N1-N3 batch | 測 loss、calibration、label-aware head | N1 focal BCE、N2 logit adjustment、N3 label-dot | N3 在 CCO 明顯贏；N1/N2 不值得主推 | N3 正式化與穩定性驗證 |
-| N3 formalization | 確認 N3 是否可重現 | confirm_long、seed2027、ontology_reg | CCO gain 可重現；MFO 仍小幅或持平 | N3 可作 CCO 新主線；MFO 需新方向 |
-| N4 fusion | 測 sequence + graph complementarity | sequence branch、graph-vocab bundle、late fusion | MFO fusion 只有非常小的 validation gain | 暫不視為 decisive win |
+| Full graph baseline | 建立 raw graph reference | raw baseline, tuned, normalized runs | raw baseline 很強；normalized/tuned 都未超越 | 做更乾淨的 the single-factor hyperparameter sweep ablation |
+| the single-factor hyperparameter sweep ablation | 測 learning rate、capacity、weighted BCE | the single-factor hyperparameter sweep results | 只有 MFO 小幅上升，沒有 CCO 大突破 | 停止 local tuning，改測高槓桿方向 |
+| this batch of experiments | 測 loss、calibration、label-aware head | the focal-BCE attempt focal BCE、the logit-adjustment attempt logit adjustment、the label-aware scorer label-dot | the label-aware scorer 在 CCO 明顯贏；the focal-BCE attempt/the logit-adjustment attempt 不值得主推 | the label-aware scorer 正式化與穩定性驗證 |
+| label-aware scorer formalization | 確認 the label-aware scorer 是否可重現 | confirm_long、seed2027、ontology_reg | CCO gain 可重現；MFO 仍小幅或持平 | the label-aware scorer 可作 CCO 新主線；MFO 需新方向 |
+| the sequence+structure fusion fusion | 測 sequence + graph complementarity | sequence branch、graph-vocab bundle、late fusion | MFO fusion 只有非常小的 validation gain | 暫不視為 decisive win |
 
 ## 3. 資料取得與早期探索
 
@@ -71,7 +71,7 @@
 後續處理：
 
 - 因為 notebook sequence baseline 的 split 與 graph split 沒完全 frozen，後續公平比較改成 matched structure-available cohort。
-- N4 使用 graph cache 對齊的 sequence artifact，避免 sequence-only 和 graph-only cohort 不一致。
+- the sequence+structure fusion 使用 graph cache 對齊的 sequence artifact，避免 sequence-only 和 graph-only cohort 不一致。
 
 ## 4. AlphaFold / Graph 前處理
 
@@ -160,37 +160,37 @@ Tuned run 的設定包含：
 後續處理：
 
 - 不再做大雜燴式 tuning。
-- 改成 E0-E5：一次只改一個主要因素，測 local hyperparameter 是否真的有 headroom。
+- 改成 the single-factor hyperparameter sweep：一次只改一個主要因素，測 local hyperparameter 是否真的有 headroom。
 
-## 7. E0-E5 Targeted Ablation
+## 7. Hyperparameter Sweep
 
 目的：固定 raw baseline recipe，測幾個局部變化是否能穩定提升 Fmax。
 
 | ID | 主要變化 |
 | --- | --- |
-| `E0` | control rerun |
-| `E1` | lower LR `0.0007` |
-| `E2` | lower LR `0.0005` |
-| `E3` | `hidden_dim = 192` |
-| `E4` | `hidden_dim = 256` |
-| `E5` | `weighted_bce` only |
+| `control rerun` | control rerun |
+| `lr=7e-4 variant` | lower LR `0.0007` |
+| `lr=5e-4 variant` | lower LR `0.0005` |
+| `hidden=192 variant` | `hidden_dim = 192` |
+| `hidden=256 variant` | `hidden_dim = 256` |
+| `weighted-BCE variant` | `weighted_bce` only |
 
 結果：
 
 | Run | Aspect | Status | Best Val Fmax | Best Test Fmax | 結論 |
 | --- | --- | --- | ---: | ---: | --- |
-| `E0 control` | `CCO` | success | `0.5641` | `0.5654` | 與 raw baseline 幾乎持平 |
-| `E0 control` | `MFO` | success | `0.4537` | `0.4595` | 比原始 raw MFO 略高 |
-| `E1 lr7e4` | `CCO` | failed | `0.5643` | `0.5660` | run 不乾淨，不作正式結論 |
-| `E1 lr7e4` | `MFO` | success | `0.4531` | `0.4597` | 小幅改善 |
-| `E2 lr5e4` | `CCO` | success | `0.5643` | `0.5655` | 幾乎持平 |
-| `E2 lr5e4` | `MFO` | success | `0.4544` | `0.4603` | 小幅改善 |
-| `E3 h192` | `CCO` | success | `0.5631` | `0.5645` | 無改善 |
-| `E3 h192` | `MFO` | success | `0.4529` | `0.4586` | 幾乎持平 |
-| `E4 h256` | `CCO` | success | `0.5633` | `0.5651` | 無改善 |
-| `E4 h256` | `MFO` | success | `0.4519` | `0.4573` | 幾乎持平 |
-| `E5 weighted_only` | `CCO` | success | `0.5640` | `0.5656` | 幾乎持平 |
-| `E5 weighted_only` | `MFO` | success | `0.4551` | `0.4605` | MFO 此輪最佳，但提升仍小 |
+| `control rerun` | `CCO` | success | `0.5641` | `0.5654` | 與 raw baseline 幾乎持平 |
+| `control rerun` | `MFO` | success | `0.4537` | `0.4595` | 比原始 raw MFO 略高 |
+| `lr=7e-4 variant` | `CCO` | failed | `0.5643` | `0.5660` | run 不乾淨，不作正式結論 |
+| `lr=7e-4 variant` | `MFO` | success | `0.4531` | `0.4597` | 小幅改善 |
+| `lr=5e-4 variant` | `CCO` | success | `0.5643` | `0.5655` | 幾乎持平 |
+| `lr=5e-4 variant` | `MFO` | success | `0.4544` | `0.4603` | 小幅改善 |
+| `hidden=192 variant` | `CCO` | success | `0.5631` | `0.5645` | 無改善 |
+| `hidden=192 variant` | `MFO` | success | `0.4529` | `0.4586` | 幾乎持平 |
+| `hidden=256 variant` | `CCO` | success | `0.5633` | `0.5651` | 無改善 |
+| `hidden=256 variant` | `MFO` | success | `0.4519` | `0.4573` | 幾乎持平 |
+| `weighted-BCE variant` | `CCO` | success | `0.5640` | `0.5656` | 幾乎持平 |
+| `weighted-BCE variant` | `MFO` | success | `0.4551` | `0.4605` | MFO 此輪最佳，但提升仍小 |
 
 解讀：
 
@@ -201,9 +201,9 @@ Tuned run 的設定包含：
 後續處理：
 
 - 停止把主力放在 local hyperparameter sweep。
-- 改測更高槓桿方向：objective、calibration、label-aware scoring、sequence-graph fusion，也就是 N1-N4。
+- 改測更高槓桿方向：objective、calibration、label-aware scoring、sequence-graph fusion，也就是 the architecture-and-objective experiments。
 
-## 8. N1-N3 Significant-Improvement Batch
+## 8. Architecture-and-Objective Experiments
 
 固定 reference setup：
 
@@ -218,41 +218,41 @@ Tuned run 的設定包含：
 
 | Direction | 核心改動 | 問題 |
 | --- | --- | --- |
-| `N1` | `LOSS_FUNCTION=focal_bce` | 是否 loss/objective 才是 long-tail bottleneck？ |
-| `N2` | `LOGIT_ADJUSTMENT=train_prior` | 是否 logits calibration 才是 Fmax bottleneck？ |
-| `N3` | `MODEL_HEAD=label_dot` | 是否 flat classifier head 是 bottleneck？ |
+| `focal-BCE attempt` | `LOSS_FUNCTION=focal_bce` | 是否 loss/objective 才是 long-tail bottleneck？ |
+| `logit-adjustment attempt` | `LOGIT_ADJUSTMENT=train_prior` | 是否 logits calibration 才是 Fmax bottleneck？ |
+| `label-aware scorer` | `MODEL_HEAD=label_dot` | 是否 flat classifier head 是 bottleneck？ |
 
 結果：
 
 | Direction | Aspect | Best Val Fmax | Best Test Fmax | vs raw baseline | 結論 |
 | --- | --- | ---: | ---: | --- | --- |
 | raw baseline | `CCO` | `0.5635` | `0.5647` | reference | anchor |
-| `N1 focal_bce` | `CCO` | `0.5591` | `0.5609` | worse | 不繼續 |
-| `N2 logit_adjust` | `CCO` | `0.5637` | `0.5652` | tied | 保留工具，不主推 |
-| `N3 label_dot` | `CCO` | `0.5822` | `0.5843` | clear win | 主線候選 |
+| `focal-BCE attempt` | `CCO` | `0.5591` | `0.5609` | worse | 不繼續 |
+| `logit-adjustment attempt` | `CCO` | `0.5637` | `0.5652` | tied | 保留工具，不主推 |
+| `label-aware scorer` | `CCO` | `0.5822` | `0.5843` | clear win | 主線候選 |
 | raw baseline | `MFO` | `0.4522` | `0.4574` | reference | anchor |
-| `N1 focal_bce` | `MFO` | `0.4452` | `0.4513` | worse | 不繼續 |
-| `N2 logit_adjust` | `MFO` | `0.4505` | `0.4558` | slightly worse | 不主推 |
-| `N3 label_dot` | `MFO` | `0.4517` | `0.4580` | near tied | 可保留但不是突破 |
+| `focal-BCE attempt` | `MFO` | `0.4452` | `0.4513` | worse | 不繼續 |
+| `logit-adjustment attempt` | `MFO` | `0.4505` | `0.4558` | slightly worse | 不主推 |
+| `label-aware scorer` | `MFO` | `0.4517` | `0.4580` | near tied | 可保留但不是突破 |
 
 解讀：
 
-- `N1` 直接淘汰。
-- `N2` 沒有證明 calibration 是主瓶頸。
-- `N3` 是第一個在 `CCO` 上帶來明確 step change 的方法。
+- `focal-BCE attempt` 直接淘汰。
+- `logit-adjustment attempt` 沒有證明 calibration 是主瓶頸。
+- `label-aware scorer` 是第一個在 `CCO` 上帶來明確 step change 的方法。
 
 後續處理：
 
-- 對 N3 做正式化：longer confirmation、second seed stability、ontology regularization follow-up。
-- N4 fusion 也繼續，因為它回答 sequence 和 graph 是否互補，而不是 graph head 設計。
+- 對 the label-aware scorer 做正式化：longer confirmation、second seed stability、ontology regularization follow-up。
+- the sequence+structure fusion fusion 也繼續，因為它回答 sequence 和 graph 是否互補，而不是 graph head 設計。
 
-## 9. N3 結果正式化與穩定性驗證
+## 9. Label-Aware Scorer Confirmation and Stability
 
-N3 formalization 相關 runs：
+label-aware scorer formalization 相關 runs：
 
 | Run | Slurm job | 目的 |
 | --- | ---: | --- |
-| `sigimp_n3_label_dot_20260422_172916` | `33706654` | 第一個 N3 label-dot full run |
+| `sigimp_n3_label_dot_20260422_172916` | `33706654` | 第一個 the label-aware scorer label-dot full run |
 | `sigimp_n3_confirm_long_20260423_104340` | `33712068` | same-seed longer confirmation |
 | `sigimp_n3_confirm_long_20260425_n3_confirm` | `33741105` | 最新 same-seed formal confirmation |
 | `sigimp_n3_stability_seed2027_20260423_104340` | `33712069` | second-seed stability |
@@ -262,16 +262,16 @@ N3 formalization 相關 runs：
 
 | Run | Aspect | Best Val Fmax | Best Test Fmax | Best epoch | 解讀 |
 | --- | --- | ---: | ---: | ---: | --- |
-| first `N3 label_dot` | `CCO` | `0.5822` | `0.5843` | 4 | 已明顯贏 raw |
-| first `N3 label_dot` | `MFO` | `0.4517` | `0.4580` | 3 | 接近持平 |
-| `N3 confirm_long 20260423` | `CCO` | `0.5842` | `0.5865` | 6 | CCO gain 更強 |
-| `N3 confirm_long 20260423` | `MFO` | `0.4501` | `0.4566` | 4 | MFO 無突破 |
-| `N3 confirm_long 20260425` | `CCO` | `0.5855` | `0.5875` | 6 | 目前最佳 CCO |
-| `N3 confirm_long 20260425` | `MFO` | `0.4514` | `0.4575` | 4 | 仍約持平 |
-| `N3 seed2027 stability` | `CCO` | `0.5806` | `0.5816` | 4 | 證明方向可重現，但有 seed variance |
-| `N3 seed2027 stability` | `MFO` | `0.4502` | `0.4562` | 5 | MFO 無突破 |
-| `N3 ontology_reg` | `CCO` | `0.5825` | `0.5846` | 4 | 與 N3 同級，未超越 latest confirm |
-| `N3 ontology_reg` | `MFO` | `0.4518` | `0.4576` | 3 | 接近持平 |
+| first `label-aware scorer` | `CCO` | `0.5822` | `0.5843` | 4 | 已明顯贏 raw |
+| first `label-aware scorer` | `MFO` | `0.4517` | `0.4580` | 3 | 接近持平 |
+| `label-aware confirm run_long 20260423` | `CCO` | `0.5842` | `0.5865` | 6 | CCO gain 更強 |
+| `label-aware confirm run_long 20260423` | `MFO` | `0.4501` | `0.4566` | 4 | MFO 無突破 |
+| `label-aware confirm run_long 20260425` | `CCO` | `0.5855` | `0.5875` | 6 | 目前最佳 CCO |
+| `label-aware confirm run_long 20260425` | `MFO` | `0.4514` | `0.4575` | 4 | 仍約持平 |
+| `the label-aware scorer seed2027 stability` | `CCO` | `0.5806` | `0.5816` | 4 | 證明方向可重現，但有 seed variance |
+| `the label-aware scorer seed2027 stability` | `MFO` | `0.4502` | `0.4562` | 5 | MFO 無突破 |
+| `label-aware + ontology reg` | `CCO` | `0.5825` | `0.5846` | 4 | 與 the label-aware scorer 同級，未超越 latest confirm |
+| `label-aware + ontology reg` | `MFO` | `0.4518` | `0.4576` | 3 | 接近持平 |
 
 最新正式化 run：
 
@@ -282,17 +282,17 @@ N3 formalization 相關 runs：
 
 解讀：
 
-- `CCO`：N3 是目前最強 graph-side recipe。相較 raw baseline，test Fmax 約 `0.5647 -> 0.5875`，提升約 `+0.0228`。
-- `MFO`：N3 沒有帶來 decisive gain。表現約在 raw / E0-E5 / fusion 的同一區間。
+- `CCO`：the label-aware scorer 是目前最強 graph-side recipe。相較 raw baseline，test Fmax 約 `0.5647 -> 0.5875`，提升約 `+0.0228`。
+- `MFO`：the label-aware scorer 沒有帶來 decisive gain。表現約在 raw / the single-factor hyperparameter sweep / fusion 的同一區間。
 
 後續處理：
 
-- 報告中可以把 N3 作為 `CCO` 的新主線結果。
-- `MFO` 不能直接宣稱 N3 解決問題；需要新的 MFO-specific strategy，例如更好的 sequence branch、loss/threshold calibration、或不同 label-aware design。
+- 報告中可以把 the label-aware scorer 作為 `CCO` 的新主線結果。
+- `MFO` 不能直接宣稱 the label-aware scorer 解決問題；需要新的 MFO-specific strategy，例如更好的 sequence branch、loss/threshold calibration、或不同 label-aware design。
 
-## 10. N4 Sequence + Graph Late Fusion
+## 10. Sequence + Graph Late Fusion
 
-N4 的目的不是改 graph head，而是測 sequence 和 graph score 是否互補。
+the sequence+structure fusion 的目的不是改 graph head，而是測 sequence 和 graph score 是否互補。
 
 Sequence branch：
 
@@ -302,24 +302,24 @@ Sequence branch：
 
 Fusion 設定：
 
-- branch：N3 MFO graph predictions + sequence predictions
+- branch：the label-aware scorer MFO graph predictions + sequence predictions
 - score space：logits
 - weights：`g0p0_s1p0` 到 `g1p0_s0p0`
 - validation Fmax 選 weight
 
-N3 graph + sequence fusion 結果：
+the label-aware scorer graph + sequence fusion 結果：
 
 | Weight | Val Fmax | Test Fmax | 解讀 |
 | --- | ---: | ---: | --- |
 | sequence only `g0p0_s1p0` | `0.4513` | `0.4557` | sequence branch 本身接近 graph |
-| N3 graph only `g1p0_s0p0` | `0.4517` | `0.4580` | graph-only slightly better test |
+| the label-aware scorer graph only `g1p0_s0p0` | `0.4517` | `0.4580` | graph-only slightly better test |
 | val-selected fusion `g0p8_s0p2` | `0.4529` | `0.4579` | validation 小幅提升，test 幾乎持平 |
 | test-best diagnostic `g0p9_s0p1` | `0.4523` on val | `0.4582` | 不作正式選擇，只是 diagnostic |
 
 解讀：
 
 - sequence 和 graph 有一點 complementarity，但目前很弱。
-- N4 不是目前的 decisive win，尤其 test-side 沒有明顯改善。
+- the sequence+structure fusion 不是目前的 decisive win，尤其 test-side 沒有明顯改善。
 
 後續處理：
 
@@ -330,16 +330,16 @@ N3 graph + sequence fusion 結果：
 
 | Aspect | 目前最佳正式 graph-side 結果 | Val Fmax | Test Fmax | 備註 |
 | --- | --- | ---: | ---: | --- |
-| `CCO` | `N3 confirm_long 20260425` | `0.5855` | `0.5875` | 目前最明確成功 |
-| `MFO` | `E5 weighted_only` by Fmax table | `0.4551` | `0.4605` | 小幅勝過 raw/N3，但不是大突破 |
+| `CCO` | `label-aware confirm run_long 20260425` | `0.5855` | `0.5875` | 目前最明確成功 |
+| `MFO` | `weighted-BCE variant` by Fmax table | `0.4551` | `0.4605` | 小幅勝過 raw/the label-aware scorer，但不是大突破 |
 | `BPO` | no formal graph result | `0.2647` | `0.2655` | raw run failed after epoch 1，不列正式比較 |
 
-若只看 N3 branch：
+若只看 the label-aware scorer branch：
 
-| Aspect | Best N3 run | Val Fmax | Test Fmax | 結論 |
+| Aspect | Best the label-aware scorer run | Val Fmax | Test Fmax | 結論 |
 | --- | --- | ---: | ---: | --- |
-| `CCO` | `N3 confirm_long 20260425` | `0.5855` | `0.5875` | N3 成立 |
-| `MFO` | `N3 label_dot / ontology_reg` level | 約 `0.4517-0.4518` | 約 `0.4580` | 接近 raw，不是突破 |
+| `CCO` | `label-aware confirm run_long 20260425` | `0.5855` | `0.5875` | the label-aware scorer 成立 |
+| `MFO` | `the label-aware scorer label_dot / ontology_reg` level | 約 `0.4517-0.4518` | 約 `0.4580` | 接近 raw，不是突破 |
 
 ## 12. 實驗決策脈絡總結
 
@@ -350,23 +350,23 @@ N3 graph + sequence fusion 結果：
 | BPO full graph 不穩 | 記憶體 / label size 是阻礙 | 正式 graph 結果先排除 BPO |
 | tiny normalized MFO 有訊號 | normalization 值得 full-data 驗證 | 跑 normalized full graph |
 | normalized full graph 未超 raw | scale 不是主瓶頸 | 不主推 normalization |
-| mixed tuned run 輸 raw | 多改動 tuning 不可靠 | 改 E0-E5 single-factor ablation |
-| E0-E5 沒有 CCO 大突破 | local tuning headroom 不大 | 轉向 N1-N4 高槓桿方向 |
-| N1 focal BCE 輸 | objective-only focal 不是解方 | 停止 N1 |
-| N2 logit adjustment 持平 | calibration 不是主要瓶頸 | 保留工具，不主推 |
-| N3 CCO 大幅提升 | flat head 可能是 CCO bottleneck | N3 formalization、stability、ontology follow-up |
-| N3 MFO 無大幅提升 | MFO bottleneck 不同 | 需要 MFO-specific 方法 |
-| N4 fusion MFO 微幅 gain | sequence/graph complementarity 弱但存在 | 保留 pipeline，先改善 branch |
+| mixed tuned run 輸 raw | 多改動 tuning 不可靠 | 改 the single-factor hyperparameter sweep single-factor ablation |
+| the single-factor hyperparameter sweep 沒有 CCO 大突破 | local tuning headroom 不大 | 轉向 the architecture-and-objective experiments 高槓桿方向 |
+| the focal-BCE attempt focal BCE 輸 | objective-only focal 不是解方 | 停止 the focal-BCE attempt |
+| the logit-adjustment attempt logit adjustment 持平 | calibration 不是主要瓶頸 | 保留工具，不主推 |
+| the label-aware scorer CCO 大幅提升 | flat head 可能是 CCO bottleneck | label-aware scorer formalization、stability、ontology follow-up |
+| the label-aware scorer MFO 無大幅提升 | MFO bottleneck 不同 | 需要 MFO-specific 方法 |
+| the sequence+structure fusion fusion MFO 微幅 gain | sequence/graph complementarity 弱但存在 | 保留 pipeline，先改善 branch |
 
 ## 13. 建議下一步
 
 短期優先順序：
 
-1. 更新舊進度文件：`docs/reports/graph_training_progress_report.md` 和 checklist 仍把 `33741105` 寫成 `RUNNING`，需要改為 `COMPLETED` 並加入最新 N3 formalization 結果。
-2. 產出一個正式 comparison artifact：把 raw、normalized、tuned、E0-E5、N1-N4、N3 follow-up 全部整理成 machine-readable table，避免未來手動抄表。
+1. 更新舊進度文件：`docs/reports/graph_training_progress_report.md` 和 checklist 仍把 `33741105` 寫成 `RUNNING`，需要改為 `COMPLETED` 並加入最新 label-aware scorer formalization 結果。
+2. 產出一個正式 comparison artifact：把 raw、normalized、tuned、the single-factor hyperparameter sweep、the architecture-and-objective experiments、the label-aware scorer follow-up 全部整理成 machine-readable table，避免未來手動抄表。
 3. 對 final report 採用 aspect-specific 結論：
-   - `CCO`：主推 N3 label-aware scorer。
-   - `MFO`：不能主推 N3 為 breakthrough；目前最佳只是小幅 local-tuning / fusion gain。
+   - `CCO`：主推 the label-aware scorer label-aware scorer。
+   - `MFO`：不能主推 the label-aware scorer 為 breakthrough；目前最佳只是小幅 local-tuning / fusion gain。
    - `BPO`：列為 memory-limited / out-of-scope for formal graph result。
 4. 若還有時間跑實驗，MFO 應優先：
    - 更強 sequence branch；
@@ -376,4 +376,4 @@ N3 graph + sequence fusion 結果：
 
 ## 14. 最終一句話
 
-我們目前已經從資料取得與前處理走到正式 graph model improvement 階段。最重要的科學結果是：`N3` label-aware protein-to-GO scorer 在 `CCO` 上明確超越 raw graph baseline，並且經過 longer confirmation 與 second-seed stability 檢查；但 `MFO` 還沒有同等級突破，後續應把 MFO 當作獨立問題處理，而不是假設 CCO 的 N3 解法會直接泛化。
+我們目前已經從資料取得與前處理走到正式 graph model improvement 階段。最重要的科學結果是：`label-aware scorer` label-aware protein-to-GO scorer 在 `CCO` 上明確超越 raw graph baseline，並且經過 longer confirmation 與 second-seed stability 檢查；但 `MFO` 還沒有同等級突破，後續應把 MFO 當作獨立問題處理，而不是假設 CCO 的 the label-aware scorer 解法會直接泛化。
