@@ -20,12 +20,12 @@ This repo contains the CAFA5 AlphaFold download pipeline, supporting tests, and 
 - `figures/`: figures rendered by the report notebook
 - `data/`: local datasets and downloaded structures
 - `output/` and `outputs/`: generated manifests, caches, notebooks, and smoke/full pipeline runs
-- `ESM/` and `kmer/`: original ESM2 / K-mer MLP baseline notebooks and scripts
+- `baselines/esm/` and `baselines/kmer/`: original ESM2 / K-mer MLP baseline notebooks and scripts
 - `requirements/`: Python dependency lockfiles (`base.txt`, plus per-environment variants)
 
 ## Baseline Pipelines (ESM / K-mer)
 
-The `ESM/` and `kmer/` directories contain the original sequence-only baselines (ESM2 embeddings + MLP, K-mer features + MLP) used as reference for the report notebook.
+The `baselines/esm/` and `baselines/kmer/` directories contain the original sequence-only baselines (ESM2 embeddings + MLP, K-mer features + MLP) used as reference for the report notebook.
 
 ## Main command
 

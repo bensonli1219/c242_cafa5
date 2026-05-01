@@ -170,10 +170,10 @@ print(f"  -> {out}")
 # ============================================================
 # Load JSON metric files (for the next 3 figures + summary tables)
 # ============================================================
-kmer_full = json.loads(Path("kmer/kmer_mlp_full_go_metrics.json").read_text())
-kmer_tuned = json.loads(Path("kmer/kmer_tuning_summary.json").read_text())
-esm_full = json.loads(Path("ESM/esm_mlp_full_go_metrics.json").read_text())
-esm_tuned = json.loads(Path("ESM/esm_tuning_summary.json").read_text())
+kmer_full = json.loads(Path("baselines/kmer/kmer_mlp_full_go_metrics.json").read_text())
+kmer_tuned = json.loads(Path("baselines/kmer/kmer_tuning_summary.json").read_text())
+esm_full = json.loads(Path("baselines/esm/esm_mlp_full_go_metrics.json").read_text())
+esm_tuned = json.loads(Path("baselines/esm/esm_tuning_summary.json").read_text())
 seq_per_ns = pd.read_csv("output/sequence_baseline_per_namespace.csv")
 
 

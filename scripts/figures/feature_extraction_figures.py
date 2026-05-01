@@ -17,7 +17,7 @@ graph cache and renders three figures:
 
 Run from the repo root with the `cafa5` conda env (torch available):
 
-    python scripts/make_feature_extraction_figures.py \
+    python scripts/figures/feature_extraction_figures.py \
         --graph output/graph_cache_normalized_smoke/graphs/Q8IXT2.pt \
         --out figures
 """

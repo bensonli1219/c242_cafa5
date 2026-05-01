@@ -43,7 +43,7 @@ RUN_STAMP="${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 export RUN_NAME="${RUN_NAME:-full_graph_tuned_${FRAMEWORK}_mtf${MIN_TERM_FREQUENCY}_${RUN_STAMP}}"
 
 REPO_ROOT_FOR_WRAPPER="${REPO_ROOT:-/global/home/users/$USER/c242_cafa5}"
-BASE_SCRIPT="${BASE_SCRIPT:-$REPO_ROOT_FOR_WRAPPER/scripts/savio_train_full_graph.sh}"
+BASE_SCRIPT="${BASE_SCRIPT:-$REPO_ROOT_FOR_WRAPPER/scripts/savio/train_full_graph.sh}"
 
 if [[ ! -f "$BASE_SCRIPT" ]]; then
   echo "Base training script not found: $BASE_SCRIPT" >&2
