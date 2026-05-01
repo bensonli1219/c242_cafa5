@@ -126,24 +126,7 @@ Benchmark one split end-to-end for the selected frameworks:
 
 On a remote NVIDIA server, switch to `--device cuda`. CPU metrics come from `psutil`; GPU metrics use `pynvml` when installed and otherwise fall back to `nvidia-smi`.
 
-## Data Exploration
-
-Generate a compact Markdown or JSON summary of the current preprocessing outputs:
-
-```bash
-./.venv/bin/python explore_cafa_data.py \
-  --root outputs/cafa5_af_100 \
-  --output-md outputs/cafa5_af_100/exploration_report.md \
-  --output-json outputs/cafa5_af_100/exploration_report.json
-```
-
-Export report-ready tables and SVG figures:
-
-```bash
-./.venv/bin/python export_cafa_report_assets.py \
-  --root outputs/cafa5_af_100 \
-  --output-dir outputs/cafa5_af_100/report_assets
-```
+## Sequence Artifacts From Graph Cache
 
 Mirror graph split manifests into sequence-side artifacts and build the
 protein-level 640-d ESM2 baseline from existing graph cache `.pt` files:
@@ -161,7 +144,7 @@ complete, writes `X.npy`, `entry_ids.txt`, and `meta.json` under
 
 ## Savio Jupyter Environment
 
-For the tutorial notebook under `output/jupyter-notebook/`, create a dedicated Python 3.11 kernel on Savio:
+To run `cafa5_pipeline_report.ipynb` on Savio, create a dedicated Python 3.11 kernel:
 
 ```bash
 module load python/3.11
