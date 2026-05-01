@@ -4,17 +4,17 @@ This repo contains the CAFA5 AlphaFold download pipeline, supporting tests, and 
 
 ## Layout
 
-- `cafa5_alphafold_pipeline.py`: main CAFA5 -> AlphaFold downloader and manifest builder
-- `alphafold_feature_extractor.py`: convert downloaded PDB/PAE files into residue, contact-graph, and fragment-level parquet features
-- `cafa_graph_dataset.py`: build protein-level graph caches and load them as PyG/DGL datasets
-- `cafa_graph_dataloaders.py`: deterministic split export plus training-ready PyG/DGL dataloader builders
-- `build_cafa_graph_cache.py`: CLI wrapper for graph cache materialization
-- `export_graph_dataloaders.py`: CLI wrapper that writes split manifests and verifies loaders
-- `benchmark_graph_dataloaders.py`: benchmark dataset/dataloader stages and report throughput plus system utilization
-- `cafa_multimodal_cache_builders.py`: remote-oriented ESM2 and DSSP/SASA cache builders
-- `build_esm2_cache.py`: CLI wrapper for per-entry ESM2 residue embeddings
-- `build_structure_cache.py`: CLI wrapper for per-fragment DSSP/SASA caches
-- `alphafold_downloader.py`: smaller standalone AlphaFold downloader demo
+- `src/cafa5_alphafold_pipeline.py`: main CAFA5 -> AlphaFold downloader and manifest builder
+- `src/alphafold_feature_extractor.py`: convert downloaded PDB/PAE files into residue, contact-graph, and fragment-level parquet features
+- `src/cafa_graph_dataset.py`: build protein-level graph caches and load them as PyG/DGL datasets
+- `src/cafa_graph_dataloaders.py`: deterministic split export plus training-ready PyG/DGL dataloader builders
+- `src/build_cafa_graph_cache.py`: CLI wrapper for graph cache materialization
+- `src/export_graph_dataloaders.py`: CLI wrapper that writes split manifests and verifies loaders
+- `src/benchmark_graph_dataloaders.py`: benchmark dataset/dataloader stages and report throughput plus system utilization
+- `src/cafa_multimodal_cache_builders.py`: remote-oriented ESM2 and DSSP/SASA cache builders
+- `src/build_esm2_cache.py`: CLI wrapper for per-entry ESM2 residue embeddings
+- `src/build_structure_cache.py`: CLI wrapper for per-fragment DSSP/SASA caches
+- `src/alphafold_downloader.py`: smaller standalone AlphaFold downloader demo
 - `cafa5_pipeline_report.ipynb`: canonical end-to-end pipeline report notebook (the project deliverable)
 - `tests/`: unit tests for the pipeline
 - `figures/`: figures rendered by the report notebook
@@ -30,7 +30,7 @@ The `baselines/esm/` and `baselines/kmer/` directories contain the original sequ
 ## Main command
 
 ```bash
-./.venv/bin/python cafa5_alphafold_pipeline.py \
+./.venv/bin/python src/cafa5_alphafold_pipeline.py \
   --train-taxonomy data/kaggle_cafa5/extracted/Train/train_taxonomy.tsv \
   --train-sequences data/kaggle_cafa5/extracted/Train/train_sequences.fasta \
   --train-terms data/kaggle_cafa5/extracted/Train/train_terms.tsv \
@@ -43,7 +43,7 @@ The `baselines/esm/` and `baselines/kmer/` directories contain the original sequ
 For a local 100-entry sample:
 
 ```bash
-./.venv/bin/python cafa5_alphafold_pipeline.py \
+./.venv/bin/python src/cafa5_alphafold_pipeline.py \
   --train-taxonomy data/kaggle_cafa5/extracted/Train/train_taxonomy.tsv \
   --train-sequences data/kaggle_cafa5/extracted/Train/train_sequences.fasta \
   --train-terms data/kaggle_cafa5/extracted/Train/train_terms.tsv \
@@ -61,7 +61,7 @@ The pipeline shows a running `tqdm` progress bar with `ok`, `partial`, and `miss
 ## Feature extraction
 
 ```bash
-./.venv/bin/python alphafold_feature_extractor.py \
+./.venv/bin/python src/alphafold_feature_extractor.py \
   --training-index outputs/cafa5_af_smoke/manifests/training_index.parquet \
   --fragment-manifest outputs/cafa5_af_smoke/manifests/alphafold_fragments.parquet \
   --output-dir outputs/cafa5_af_smoke/features
@@ -87,7 +87,7 @@ This keeps the graph stack (`torch`, `torch_geometric`, `dgl`) isolated from the
 ## Graph Cache Builder
 
 ```bash
-./.venv311/bin/python build_cafa_graph_cache.py \
+./.venv311/bin/python src/build_cafa_graph_cache.py \
   --training-index outputs/cafa5_af_smoke/manifests/training_index.parquet \
   --fragment-features outputs/cafa5_af_smoke/features/fragment_features.parquet \
   --residue-features outputs/cafa5_af_smoke/features/residue_features.parquet \
@@ -102,7 +102,7 @@ This writes per-protein graph payloads under `graphs/` and metadata/vocab files 
 Export deterministic train/val/test splits and verify the PyG / DGL loaders:
 
 ```bash
-./.venv311/bin/python export_graph_dataloaders.py \
+./.venv311/bin/python src/export_graph_dataloaders.py \
   --root outputs/cafa5_af_100/graph_cache \
   --aspects BPO CCO MFO \
   --batch-size 8
@@ -115,7 +115,7 @@ This writes split manifests under `graph_cache/splits/<aspect>/` and an `export_
 Benchmark one split end-to-end for the selected frameworks:
 
 ```bash
-./.venv311/bin/python benchmark_graph_dataloaders.py \
+./.venv311/bin/python src/benchmark_graph_dataloaders.py \
   --root outputs/cafa5_af_100/graph_cache \
   --frameworks pyg dgl \
   --aspects BPO CCO MFO \
@@ -149,7 +149,7 @@ Mirror graph split manifests into sequence-side artifacts and build the
 protein-level 640-d ESM2 baseline from existing graph cache `.pt` files:
 
 ```bash
-./.venv311/bin/python export_sequence_artifacts_from_graph_cache.py \
+./.venv311/bin/python src/export_sequence_artifacts_from_graph_cache.py \
   --run-root outputs/cafa5_af_100 \
   --min-term-frequency 20
 ```
@@ -191,7 +191,7 @@ INSTALL_FULL_GRAPH=1 INSTALL_MULTIMODAL=1 bash scripts/savio/setup_notebook_env.
 Run a minimal end-to-end training loop on one aspect:
 
 ```bash
-./.venv311/bin/python train_minimal_graph_model.py \
+./.venv311/bin/python src/train_minimal_graph_model.py \
   --root outputs/cafa5_af_100/graph_cache \
   --framework pyg \
   --aspect MFO \
@@ -214,7 +214,7 @@ python -m venv .venv_remote
 Then build ESM2 caches directly into the graph cache tree:
 
 ```bash
-./.venv_remote/bin/python build_esm2_cache.py \
+./.venv_remote/bin/python src/build_esm2_cache.py \
   --training-index outputs/cafa5_af_100/manifests/training_index.parquet \
   --output-dir outputs/cafa5_af_100/graph_cache/modality_cache/esm2 \
   --resume
@@ -223,15 +223,15 @@ Then build ESM2 caches directly into the graph cache tree:
 And build DSSP/SASA caches for each AlphaFold fragment:
 
 ```bash
-./.venv_remote/bin/python build_structure_cache.py \
+./.venv_remote/bin/python src/build_structure_cache.py \
   --fragment-manifest outputs/cafa5_af_100/manifests/alphafold_fragments.parquet \
   --output-dir outputs/cafa5_af_100/graph_cache/modality_cache/structure \
   --resume
 ```
 
-`build_structure_cache.py` expects `mkdssp` and `freesasa` to be installed on the remote machine and available on `PATH`. When a cache file is missing, `CafaPyGDataset` and `CafaDGLDataset` keep the reserved feature slots zero-filled and leave the modality mask unset.
+`src/build_structure_cache.py` expects `mkdssp` and `freesasa` to be installed on the remote machine and available on `PATH`. When a cache file is missing, `CafaPyGDataset` and `CafaDGLDataset` keep the reserved feature slots zero-filled and leave the modality mask unset.
 
-On a local machine without those binaries, `build_structure_cache.py` can still run if `mdtraj` is installed. In that case it falls back to `mdtraj`-based secondary-structure, phi/psi, and residue SASA features while keeping the same output schema.
+On a local machine without those binaries, `src/build_structure_cache.py` can still run if `mdtraj` is installed. In that case it falls back to `mdtraj`-based secondary-structure, phi/psi, and residue SASA features while keeping the same output schema.
 
 On Savio, you can submit the sequence-side export as a batch job:
 

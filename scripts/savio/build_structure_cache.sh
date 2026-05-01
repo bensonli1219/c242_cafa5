@@ -22,8 +22,8 @@ USE_CONDA="${USE_CONDA:-1}"
 
 mkdir -p "$LOG_DIR"
 
-if [[ ! -f "$REPO_ROOT/build_structure_cache.py" ]]; then
-  echo "Missing script: $REPO_ROOT/build_structure_cache.py" >&2
+if [[ ! -f "$REPO_ROOT/src/build_structure_cache.py" ]]; then
+  echo "Missing script: $REPO_ROOT/src/build_structure_cache.py" >&2
   echo "Set REPO_ROOT to your checked-out repo path before sbatch." >&2
   exit 1
 fi
@@ -76,7 +76,7 @@ echo "SLURM_CPUS_PER_TASK=${SLURM_CPUS_PER_TASK:-}"
 command -v mkdssp && echo "mkdssp found" || echo "mkdssp not found; builder will fall back if mdtraj works"
 command -v freesasa && echo "freesasa found" || echo "freesasa not found; builder will fall back if mdtraj works"
 
-"$PYTHON_BIN" -u "$REPO_ROOT/build_structure_cache.py" \
+"$PYTHON_BIN" -u "$REPO_ROOT/src/build_structure_cache.py" \
     --fragment-manifest "$RUN_ROOT/manifests/alphafold_fragments.parquet" \
     --output-dir "$RUN_ROOT/graph_cache/modality_cache/structure" \
     --workers "${SLURM_CPUS_PER_TASK:-1}" \

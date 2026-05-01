@@ -25,8 +25,8 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$REPO_ROOT/build_esm2_cache.py" ]]; then
-  echo "Missing script: $REPO_ROOT/build_esm2_cache.py" >&2
+if [[ ! -f "$REPO_ROOT/src/build_esm2_cache.py" ]]; then
+  echo "Missing script: $REPO_ROOT/src/build_esm2_cache.py" >&2
   echo "Set REPO_ROOT to your checked-out repo path before sbatch." >&2
   exit 1
 fi
@@ -40,7 +40,7 @@ echo "REPO_ROOT=$REPO_ROOT"
 echo "RUN_ROOT=$RUN_ROOT"
 echo "HF_HOME=$HF_HOME"
 
-"$PYTHON_BIN" -u "$REPO_ROOT/build_esm2_cache.py" \
+"$PYTHON_BIN" -u "$REPO_ROOT/src/build_esm2_cache.py" \
     --training-index "$RUN_ROOT/manifests/training_index.parquet" \
     --output-dir "$RUN_ROOT/graph_cache/modality_cache/esm2" \
     --resume

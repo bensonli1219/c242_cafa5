@@ -25,8 +25,8 @@ GRAPH_WORKERS="${GRAPH_WORKERS:-${SLURM_CPUS_PER_TASK:-1}}"
 
 mkdir -p "$LOG_DIR"
 
-if [[ ! -f "$REPO_ROOT/build_cafa_graph_cache.py" ]]; then
-  echo "Missing script: $REPO_ROOT/build_cafa_graph_cache.py" >&2
+if [[ ! -f "$REPO_ROOT/src/build_cafa_graph_cache.py" ]]; then
+  echo "Missing script: $REPO_ROOT/src/build_cafa_graph_cache.py" >&2
   echo "Set REPO_ROOT to your checked-out repo path before sbatch." >&2
   exit 1
 fi
@@ -79,7 +79,7 @@ echo "SLURM_CPUS_PER_TASK=${SLURM_CPUS_PER_TASK:-}"
 
 "$PYTHON_BIN" -c "import sys; print('python_executable=' + sys.executable)"
 
-"$PYTHON_BIN" -u "$REPO_ROOT/build_cafa_graph_cache.py" \
+"$PYTHON_BIN" -u "$REPO_ROOT/src/build_cafa_graph_cache.py" \
     --training-index "$RUN_ROOT/manifests/training_index.parquet" \
     --fragment-features "$RUN_ROOT/features/fragment_features.parquet" \
     --residue-features "$RUN_ROOT/features/residue_features.parquet" \

@@ -158,8 +158,8 @@ else:
     print("walltime_limit_finish_by=unknown")
 PY
 
-if [[ ! -f "$REPO_ROOT/train_minimal_graph_model.py" ]]; then
-  echo "Missing script: $REPO_ROOT/train_minimal_graph_model.py" >&2
+if [[ ! -f "$REPO_ROOT/src/train_minimal_graph_model.py" ]]; then
+  echo "Missing script: $REPO_ROOT/src/train_minimal_graph_model.py" >&2
   echo "Set REPO_ROOT to your checked-out repo path before sbatch." >&2
   exit 1
 fi
@@ -440,7 +440,7 @@ run_aspect() {
   start_time="$(date -Iseconds)"
 
   cmd=(
-    "$PYTHON_BIN" -u "$REPO_ROOT/train_minimal_graph_model.py"
+    "$PYTHON_BIN" -u "$REPO_ROOT/src/train_minimal_graph_model.py"
     --root "$GRAPH_CACHE_DIR"
     --split-dir "$SPLIT_DIR"
     --framework "$FRAMEWORK"

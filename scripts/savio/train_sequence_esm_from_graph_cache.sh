@@ -45,8 +45,8 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$REPO_ROOT/train_sequence_esm_from_graph_cache.py" ]]; then
-  echo "Missing script: $REPO_ROOT/train_sequence_esm_from_graph_cache.py" >&2
+if [[ ! -f "$REPO_ROOT/src/train_sequence_esm_from_graph_cache.py" ]]; then
+  echo "Missing script: $REPO_ROOT/src/train_sequence_esm_from_graph_cache.py" >&2
   exit 1
 fi
 
@@ -87,7 +87,7 @@ echo "MATCHED_SPLIT_DIR=$MATCHED_SPLIT_DIR"
 echo "GRAPH_ROOT=$GRAPH_ROOT"
 
 srun --ntasks=1 --cpus-per-task="${SLURM_CPUS_PER_TASK:-1}" \
-  "$PYTHON_BIN" -u "$REPO_ROOT/train_sequence_esm_from_graph_cache.py" \
+  "$PYTHON_BIN" -u "$REPO_ROOT/src/train_sequence_esm_from_graph_cache.py" \
     --run-root "$RUN_ROOT" \
     --aspect "$ASPECT" \
     --model-type "$MODEL_TYPE" \

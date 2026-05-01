@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cafa5"
+version = "0.1.0"
+description = "CAFA5 AlphaFold-based protein function prediction pipeline"
+requires-python = ">=3.10"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = [
+    "alphafold_downloader",
+    "alphafold_feature_extractor",
+    "benchmark_graph_dataloaders",
+    "build_cafa_graph_cache",
+    "build_esm2_cache",
+    "build_structure_cache",
+    "cafa5_alphafold_pipeline",
+    "cafa_graph_dataloaders",
+    "cafa_graph_dataset",
+    "cafa_multimodal_cache_builders",
+    "export_graph_dataloaders",
+    "export_graph_prediction_bundles",
+    "export_sequence_artifacts_from_graph_cache",
+    "fuse_prediction_scores",
+    "train_minimal_graph_model",
+    "train_sequence_esm_from_graph_cache",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]

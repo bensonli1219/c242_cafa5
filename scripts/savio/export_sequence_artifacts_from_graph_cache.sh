@@ -28,8 +28,8 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$REPO_ROOT/export_sequence_artifacts_from_graph_cache.py" ]]; then
-  echo "Missing script: $REPO_ROOT/export_sequence_artifacts_from_graph_cache.py" >&2
+if [[ ! -f "$REPO_ROOT/src/export_sequence_artifacts_from_graph_cache.py" ]]; then
+  echo "Missing script: $REPO_ROOT/src/export_sequence_artifacts_from_graph_cache.py" >&2
   echo "Set REPO_ROOT to your checked-out repo path before sbatch." >&2
   exit 1
 fi
@@ -45,7 +45,7 @@ echo "PROGRESS_EVERY=$PROGRESS_EVERY"
 echo "WORKERS=$WORKERS"
 echo "PROGRESS_MODE=$PROGRESS_MODE"
 
-"$PYTHON_BIN" -u "$REPO_ROOT/export_sequence_artifacts_from_graph_cache.py" \
+"$PYTHON_BIN" -u "$REPO_ROOT/src/export_sequence_artifacts_from_graph_cache.py" \
   --run-root "$RUN_ROOT" \
   --min-term-frequency "$MIN_TERM_FREQUENCY" \
   --progress-every "$PROGRESS_EVERY" \
