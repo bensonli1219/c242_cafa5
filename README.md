@@ -165,7 +165,7 @@ For the tutorial notebook under `output/jupyter-notebook/`, create a dedicated P
 
 ```bash
 module load python/3.11
-bash scripts/setup_savio_notebook_env.sh
+bash scripts/savio/setup_notebook_env.sh
 ```
 
 This creates `~/venvs/cafa5-notebook`, installs the notebook-only dependencies from `requirements/notebook-savio.txt`, and registers a Jupyter kernel named `cafa5-notebook`.
@@ -176,14 +176,14 @@ If you also want the graph stack inside the same environment:
 
 ```bash
 module load python/3.11
-INSTALL_FULL_GRAPH=1 bash scripts/setup_savio_notebook_env.sh
+INSTALL_FULL_GRAPH=1 bash scripts/savio/setup_notebook_env.sh
 ```
 
 If you also want the remote multimodal cache builders in that environment:
 
 ```bash
 module load python/3.11
-INSTALL_FULL_GRAPH=1 INSTALL_MULTIMODAL=1 bash scripts/setup_savio_notebook_env.sh
+INSTALL_FULL_GRAPH=1 INSTALL_MULTIMODAL=1 bash scripts/savio/setup_notebook_env.sh
 ```
 
 ## Minimal Training Loop
@@ -236,7 +236,7 @@ On a local machine without those binaries, `build_structure_cache.py` can still 
 On Savio, you can submit the sequence-side export as a batch job:
 
 ```bash
-sbatch scripts/savio_export_sequence_artifacts_from_graph_cache.sh
+sbatch scripts/savio/export_sequence_artifacts_from_graph_cache.sh
 ```
 
 Override `PYTHON_BIN`, `RUN_ROOT`, `MIN_TERM_FREQUENCY`, or append flags such as
