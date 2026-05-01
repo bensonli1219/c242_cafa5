@@ -1,0 +1,17 @@
+{
+  "best_learning_rate": 0.001,
+  "best_dropout": 0.3,
+  "best_weight_decay": 0.0,
+  "final_best_val_loss": 0.09626565076072108,
+  "final_best_micro": {
+    "threshold": 0.7500000000000002,
+    "micro_f1": 0.15036308447686397,
+    "macro_f1": 0.042363616960929
+  },
+  "final_best_macro": {
+    "threshold": 0.6500000000000001,
+    "micro_f1": 0.14809684198717687,
+    "macro_f1": 0.04641646766062745
+  },
+  "final_model_path": "kmer_final_best_model.pt"
+}

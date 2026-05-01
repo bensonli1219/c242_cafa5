@@ -1,0 +1,19 @@
+{
+  "best_learning_rate": 0.001,
+  "best_dropout": 0.3,
+  "best_weight_decay": 0.0,
+  "best_hidden1": 1024,
+  "best_hidden2": 512,
+  "final_best_val_loss": 0.07821710324761542,
+  "final_best_micro": {
+    "threshold": 0.7500000000000002,
+    "micro_f1": 0.2012154299395264,
+    "macro_f1": 0.06214149901078674
+  },
+  "final_best_macro": {
+    "threshold": 0.7500000000000002,
+    "micro_f1": 0.2012154299395264,
+    "macro_f1": 0.06214149901078674
+  },
+  "final_model_path": "esm_final_full.pt"
+}

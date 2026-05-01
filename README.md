@@ -25,6 +25,12 @@ This repo contains the CAFA5 AlphaFold download pipeline, supporting tests, and 
 - `figures/`: report and presentation figures
 - `data/`: local datasets and downloaded structures
 - `output/` and `outputs/`: generated manifests, caches, notebooks, and smoke/full pipeline runs
+- `ESM/` and `kmer/`: original ESM2 / K-mer MLP baseline notebooks and scripts (see `docs/esm_kmer_pipeline.md`)
+- `requirements.txt`: top-level Python dependencies for the baseline pipelines
+
+## Baseline Pipelines (ESM / K-mer)
+
+The `ESM/` and `kmer/` directories contain the original sequence-only baselines (ESM2 embeddings + MLP, K-mer features + MLP) used for reference. End-to-end run instructions, evaluation metric, and authorship are documented in [`docs/esm_kmer_pipeline.md`](docs/esm_kmer_pipeline.md).
 
 ## Main command
 

@@ -1,0 +1,17 @@
+{
+  "learning_rate": 0.001,
+  "dropout": 0.3,
+  "weight_decay": 1e-05,
+  "baseline_best_val_loss": 0.11079309205101295,
+  "baseline_best_micro": {
+    "threshold": 0.6500000000000001,
+    "micro_f1": 0.11965274088724821,
+    "macro_f1": 0.011004302698240912
+  },
+  "baseline_best_macro": {
+    "threshold": 0.5500000000000002,
+    "micro_f1": 0.11479506077741274,
+    "macro_f1": 0.011135965008006805
+  },
+  "baseline_model_path": "baseline_sanity_check.pt"
+}

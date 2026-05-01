@@ -1,14 +1,15 @@
-.DS_Store
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
 .venv311/
+esm_env/
 .codex
 .codex/
 .ipynb_checkpoints/
 **/.ipynb_checkpoints/
 ~$*.docx
+.DS_Store
 
 # Generated data and local outputs stay inside the repo folder but are not versioned.
 /data/alphafold_demo/
@@ -16,12 +17,19 @@ __pycache__/
 /data/kaggle_cafa5/extracted/
 /output/
 /outputs/
+data_processed*/
+*_outputs/
+cafa-5-protein-function-prediction/
 
 # Local run logs and training artifacts.
 *.err
 *.log
 *.out
 nohup.out
+logs/
 *.ckpt
 *.pt
 *.pth
+*.npy
+*.npz
+*.pkl
