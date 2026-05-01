@@ -15,22 +15,18 @@ This repo contains the CAFA5 AlphaFold download pipeline, supporting tests, and 
 - `build_esm2_cache.py`: CLI wrapper for per-entry ESM2 residue embeddings
 - `build_structure_cache.py`: CLI wrapper for per-fragment DSSP/SASA caches
 - `alphafold_downloader.py`: smaller standalone AlphaFold downloader demo
+- `cafa5_pipeline_report.ipynb`: canonical end-to-end pipeline report notebook (the project deliverable)
 - `tests/`: unit tests for the pipeline
-- `docs/planning/`: experiment plans and implementation checklists
-- `docs/reports/`: final reports and experiment summaries
-- `docs/presentations/`: presentation deck and speaking scripts
-- `docs/progress_reports/`: historical checkpoint PDFs
-- `docs/data_preprocessing.md`: detailed record of the current data preprocessing pipeline and design rationale
 - `notebooks/reports/`: report notebooks
-- `figures/`: report and presentation figures
+- `figures/`: figures rendered by the report notebook
 - `data/`: local datasets and downloaded structures
 - `output/` and `outputs/`: generated manifests, caches, notebooks, and smoke/full pipeline runs
-- `ESM/` and `kmer/`: original ESM2 / K-mer MLP baseline notebooks and scripts (see `docs/esm_kmer_pipeline.md`)
-- `requirements.txt`: top-level Python dependencies for the baseline pipelines
+- `ESM/` and `kmer/`: original ESM2 / K-mer MLP baseline notebooks and scripts
+- `requirements/`: Python dependency lockfiles (`base.txt`, plus per-environment variants)
 
 ## Baseline Pipelines (ESM / K-mer)
 
-The `ESM/` and `kmer/` directories contain the original sequence-only baselines (ESM2 embeddings + MLP, K-mer features + MLP) used for reference. End-to-end run instructions, evaluation metric, and authorship are documented in [`docs/esm_kmer_pipeline.md`](docs/esm_kmer_pipeline.md).
+The `ESM/` and `kmer/` directories contain the original sequence-only baselines (ESM2 embeddings + MLP, K-mer features + MLP) used as reference for the report notebook.
 
 ## Main command
 
@@ -84,7 +80,7 @@ Create a separate Python 3.11 environment for the local graph MVP:
 
 ```bash
 /opt/homebrew/bin/python3.11 -m venv .venv311
-./.venv311/bin/pip install -r requirements-graph-local.txt
+./.venv311/bin/pip install -r requirements/graph-local.txt
 ```
 
 This keeps the graph stack (`torch`, `torch_geometric`, `dgl`) isolated from the existing Python 3.13 environment.
@@ -173,7 +169,7 @@ module load python/3.11
 bash scripts/setup_savio_notebook_env.sh
 ```
 
-This creates `~/venvs/cafa5-notebook`, installs the notebook-only dependencies from `requirements-notebook-savio.txt`, and registers a Jupyter kernel named `cafa5-notebook`.
+This creates `~/venvs/cafa5-notebook`, installs the notebook-only dependencies from `requirements/notebook-savio.txt`, and registers a Jupyter kernel named `cafa5-notebook`.
 
 The Savio environment should stay on `numpy<2` because `pyarrow` and other compiled scientific packages on shared HPC stacks are often built against the NumPy 1.x ABI. If you accidentally launch the default Anaconda kernel, imports may fail with errors such as `_ARRAY_API not found` or `numpy.core.multiarray failed to import`.
 
@@ -213,7 +209,7 @@ Install the remote-only Python dependencies on the training server:
 
 ```bash
 python -m venv .venv_remote
-./.venv_remote/bin/pip install -r requirements-remote-multimodal.txt
+./.venv_remote/bin/pip install -r requirements/remote-multimodal.txt
 ```
 
 Then build ESM2 caches directly into the graph cache tree:
