@@ -21,7 +21,7 @@ This repo contains the CAFA5 AlphaFold download pipeline, supporting tests, and 
 - `data/`: local datasets and downloaded structures
 - `output/` and `outputs/`: generated manifests, caches, notebooks, and smoke/full pipeline runs
 - `baselines/esm/` and `baselines/kmer/`: original ESM2 / K-mer MLP baseline notebooks and scripts
-- `requirements/`: Python dependency lockfiles (`base.txt`, plus per-environment variants)
+- `requirements/`: per-environment Python dependency lists (`graph-local`, `graph-savio-cu121`, `graph-savio-module`, `notebook-savio`, `remote-multimodal`)
 
 ## Baseline Pipelines (ESM / K-mer)
 
