@@ -17,7 +17,6 @@ This repo contains the CAFA5 AlphaFold download pipeline, supporting tests, and 
 - `alphafold_downloader.py`: smaller standalone AlphaFold downloader demo
 - `cafa5_pipeline_report.ipynb`: canonical end-to-end pipeline report notebook (the project deliverable)
 - `tests/`: unit tests for the pipeline
-- `notebooks/reports/`: report notebooks
 - `figures/`: figures rendered by the report notebook
 - `data/`: local datasets and downloaded structures
 - `output/` and `outputs/`: generated manifests, caches, notebooks, and smoke/full pipeline runs
