@@ -20,6 +20,7 @@ This repo contains the CAFA5 AlphaFold download pipeline, supporting tests, and 
 - `docs/reports/`: final reports and experiment summaries
 - `docs/presentations/`: presentation deck and speaking scripts
 - `docs/progress_reports/`: historical checkpoint PDFs
+- `docs/data_preprocessing.md`: detailed record of the current data preprocessing pipeline and design rationale
 - `notebooks/reports/`: report notebooks
 - `figures/`: report and presentation figures
 - `data/`: local datasets and downloaded structures
@@ -124,6 +125,66 @@ Benchmark one split end-to-end for the selected frameworks:
 
 On a remote NVIDIA server, switch to `--device cuda`. CPU metrics come from `psutil`; GPU metrics use `pynvml` when installed and otherwise fall back to `nvidia-smi`.
 
+## Data Exploration
+
+Generate a compact Markdown or JSON summary of the current preprocessing outputs:
+
+```bash
+./.venv/bin/python explore_cafa_data.py \
+  --root outputs/cafa5_af_100 \
+  --output-md outputs/cafa5_af_100/exploration_report.md \
+  --output-json outputs/cafa5_af_100/exploration_report.json
+```
+
+Export report-ready tables and SVG figures:
+
+```bash
+./.venv/bin/python export_cafa_report_assets.py \
+  --root outputs/cafa5_af_100 \
+  --output-dir outputs/cafa5_af_100/report_assets
+```
+
+Mirror graph split manifests into sequence-side artifacts and build the
+protein-level 640-d ESM2 baseline from existing graph cache `.pt` files:
+
+```bash
+./.venv311/bin/python export_sequence_artifacts_from_graph_cache.py \
+  --run-root outputs/cafa5_af_100 \
+  --min-term-frequency 20
+```
+
+This writes matched split files under
+`sequence_artifacts/matched_structure_splits/` and, when the graph ESM cache is
+complete, writes `X.npy`, `entry_ids.txt`, and `meta.json` under
+`sequence_artifacts/protein_esm2_t30_150m_640_from_graph_cache/`.
+
+## Savio Jupyter Environment
+
+For the tutorial notebook under `output/jupyter-notebook/`, create a dedicated Python 3.11 kernel on Savio:
+
+```bash
+module load python/3.11
+bash scripts/setup_savio_notebook_env.sh
+```
+
+This creates `~/venvs/cafa5-notebook`, installs the notebook-only dependencies from `requirements-notebook-savio.txt`, and registers a Jupyter kernel named `cafa5-notebook`.
+
+The Savio environment should stay on `numpy<2` because `pyarrow` and other compiled scientific packages on shared HPC stacks are often built against the NumPy 1.x ABI. If you accidentally launch the default Anaconda kernel, imports may fail with errors such as `_ARRAY_API not found` or `numpy.core.multiarray failed to import`.
+
+If you also want the graph stack inside the same environment:
+
+```bash
+module load python/3.11
+INSTALL_FULL_GRAPH=1 bash scripts/setup_savio_notebook_env.sh
+```
+
+If you also want the remote multimodal cache builders in that environment:
+
+```bash
+module load python/3.11
+INSTALL_FULL_GRAPH=1 INSTALL_MULTIMODAL=1 bash scripts/setup_savio_notebook_env.sh
+```
+
 ## Minimal Training Loop
 
 Run a minimal end-to-end training loop on one aspect:
@@ -170,6 +231,15 @@ And build DSSP/SASA caches for each AlphaFold fragment:
 `build_structure_cache.py` expects `mkdssp` and `freesasa` to be installed on the remote machine and available on `PATH`. When a cache file is missing, `CafaPyGDataset` and `CafaDGLDataset` keep the reserved feature slots zero-filled and leave the modality mask unset.
 
 On a local machine without those binaries, `build_structure_cache.py` can still run if `mdtraj` is installed. In that case it falls back to `mdtraj`-based secondary-structure, phi/psi, and residue SASA features while keeping the same output schema.
+
+On Savio, you can submit the sequence-side export as a batch job:
+
+```bash
+sbatch scripts/savio_export_sequence_artifacts_from_graph_cache.sh
+```
+
+Override `PYTHON_BIN`, `RUN_ROOT`, `MIN_TERM_FREQUENCY`, or append flags such as
+`--skip-matched-splits`, `--skip-protein-esm`, or `--overwrite` as needed.
 
 ## Tests
 
